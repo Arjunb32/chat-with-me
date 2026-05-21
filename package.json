@@ -1,0 +1,32 @@
+{
+  "name": "chat-with-me",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A private, invite-only, end-to-end encrypted chat website for two people.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "backup": "node scripts/backup.js",
+    "restore": "node scripts/restore.js",
+    "migrate:postgres": "node scripts/migrate-json-to-postgres.js",
+    "migrate:media": "node scripts/migrate-media-to-s3.js",
+    "check": "node --check src/server.js && node --check src/store.js && node --check src/postgres-store.js && node --check src/media-storage.js && node --check src/security.js && node --check scripts/backup.js && node --check scripts/restore.js && node --check scripts/migrate-json-to-postgres.js && node --check scripts/migrate-media-to-s3.js && node --check public/app.js && node --check public/sw.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1041.0",
+    "bcryptjs": "^3.0.2",
+    "compression": "^1.8.1",
+    "cookie": "^1.0.2",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "pg": "^8.20.0",
+    "socket.io": "^4.8.1"
+  }
+}

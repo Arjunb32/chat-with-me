@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f35f4c">
+    <title>Chat With Me</title>
+    <link rel="manifest" href="/manifest.webmanifest?v=20260504-3">
+    <link rel="stylesheet" href="/styles.css?v=20260504-3">
+  </head>
+  <body>
+    <section id="authView" class="auth-view">
+      <div class="auth-wrap">
+        <div class="wordmark">
+          <span class="wordmark-mark"></span>
+          <div>
+            <p>CHAT WITH ME</p>
+            <strong>Private chat</strong>
+          </div>
+        </div>
+
+        <div id="authNotice" class="notice" hidden></div>
+
+        <form id="ownerForm" class="auth-panel" hidden>
+          <h1>Create first account</h1>
+          <label>
+            Display name
+            <input name="displayName" autocomplete="name" required minlength="2" maxlength="32">
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="new-password" required minlength="10">
+          </label>
+          <label id="setupCodeField" hidden>
+            Setup code
+            <input name="setupCode" autocomplete="one-time-code">
+          </label>
+          <button type="submit">Create account</button>
+        </form>
+
+        <div id="returningForms" class="auth-grid" hidden>
+          <form id="loginForm" class="auth-panel">
+            <h1>Sign in</h1>
+            <label>
+              Display name
+              <input name="displayName" autocomplete="username" required minlength="2" maxlength="32">
+            </label>
+            <label>
+              Password
+              <input name="password" type="password" autocomplete="current-password" required minlength="10">
+            </label>
+            <label>
+              Recovery code
+              <input name="recoveryCode" autocomplete="one-time-code" placeholder="Only needed on a new device">
+            </label>
+            <button type="submit">Sign in</button>
+          </form>
+
+          <form id="signupForm" class="auth-panel">
+            <h1>Join with invite</h1>
+            <label>
+              Invite code
+              <input name="inviteCode" autocomplete="one-time-code" required>
+            </label>
+            <label>
+              Display name
+              <input name="displayName" autocomplete="name" required minlength="2" maxlength="32">
+            </label>
+            <label>
+              Password
+              <input name="password" type="password" autocomplete="new-password" required minlength="10">
+            </label>
+            <button type="submit">Join</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section id="unlockView" class="unlock-view" hidden>
+      <form id="unlockForm" class="unlock-panel">
+        <div class="wordmark compact">
+          <span class="wordmark-mark"></span>
+          <div>
+            <p id="unlockName">CHAT WITH ME</p>
+            <strong>Encrypted</strong>
+          </div>
+        </div>
+        <label>
+          Private encryption phrase
+          <input name="phrase" type="password" autocomplete="off" required minlength="12">
+        </label>
+        <button type="submit">Unlock chat</button>
+        <button id="logoutFromUnlock" class="ghost" type="button">Logout</button>
+      </form>
+    </section>
+
+    <section id="chatView" class="chat-view" hidden>
+      <header class="chat-header">
+        <div class="chat-title">
+          <h1>Chat With Me</h1>
+          <p id="presenceText">Offline</p>
+        </div>
+        <div class="header-actions">
+          <button id="inviteButton" type="button">Invite</button>
+          <button id="codesButton" type="button" class="ghost">Codes</button>
+          <button id="lockButton" type="button" class="ghost">Lock</button>
+          <button id="logoutButton" type="button" class="ghost">Logout</button>
+        </div>
+      </header>
+
+      <main class="messages-shell">
+        <button id="loadOlderButton" type="button" class="load-older">Load older</button>
+        <div id="messageList" class="message-list" aria-live="polite"></div>
+      </main>
+
+      <div id="typingLine" class="typing-line" hidden></div>
+      <div id="uploadLine" class="upload-line" hidden></div>
+
+      <form id="composerForm" class="composer">
+        <button id="photoButton" class="icon-button" type="button" aria-label="Send photo" title="Send photo">
+          <span aria-hidden="true">Photo</span>
+        </button>
+        <input id="photoInput" type="file" accept="image/*" hidden>
+        <button id="recordButton" class="icon-button" type="button" aria-label="Record voice message" title="Record voice message">
+          <span aria-hidden="true">Voice</span>
+        </button>
+        <textarea id="messageInput" rows="1" maxlength="4000" placeholder="Message"></textarea>
+        <select id="expirySelect" aria-label="Disappearing message timer">
+          <option value="0">Keep</option>
+          <option value="3600000">1h</option>
+          <option value="86400000">24h</option>
+          <option value="604800000">7d</option>
+        </select>
+        <button id="sendButton" type="submit">Send</button>
+      </form>
+    </section>
+
+    <dialog id="inviteDialog" class="modal">
+      <form method="dialog">
+        <h2>Invite</h2>
+        <textarea id="inviteCodeOutput" readonly rows="4"></textarea>
+        <div class="modal-actions">
+          <button id="copyInviteButton" type="button">Copy</button>
+          <button type="submit" class="ghost">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="codesDialog" class="modal">
+      <form method="dialog">
+        <h2>Recovery codes</h2>
+        <textarea id="codesOutput" readonly rows="8"></textarea>
+        <div class="modal-actions">
+          <button id="copyCodesButton" type="button">Copy</button>
+          <button type="submit" class="ghost">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="viewerDialog" class="viewer">
+      <form method="dialog">
+        <button type="submit" class="viewer-close" aria-label="Close">Close</button>
+      </form>
+      <img id="viewerImage" alt="">
+    </dialog>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/app.js?v=20260504-3"></script>
+  </body>
+</html>

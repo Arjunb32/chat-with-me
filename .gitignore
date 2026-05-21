@@ -1,0 +1,8 @@
+node_modules/
+data/db.json
+storage/attachments/
+backups/
+.env
+npm-debug.log*
+server*.log
+*.local
