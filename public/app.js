@@ -9,7 +9,10 @@
     me: null,
     people: [],
     onlineUserIds: [],
-    cryptoKey: null,
+    cryptoRootKey: null,
+    cryptoKeyCache: new Map(),
+    keyFingerprint: '',
+    sessionEpoch: 1,
     socket: null,
     messages: [],
     decryptedMessages: new Map(),
@@ -36,6 +39,8 @@
     presenceText: document.querySelector('#presenceText'),
     inviteButton: document.querySelector('#inviteButton'),
     codesButton: document.querySelector('#codesButton'),
+    keyButton: document.querySelector('#keyButton'),
+    accountButton: document.querySelector('#accountButton'),
     lockButton: document.querySelector('#lockButton'),
     logoutButton: document.querySelector('#logoutButton'),
     loadOlderButton: document.querySelector('#loadOlderButton'),
@@ -55,6 +60,14 @@
     codesDialog: document.querySelector('#codesDialog'),
     codesOutput: document.querySelector('#codesOutput'),
     copyCodesButton: document.querySelector('#copyCodesButton'),
+    keyDialog: document.querySelector('#keyDialog'),
+    keyFingerprintOutput: document.querySelector('#keyFingerprintOutput'),
+    keyEpochText: document.querySelector('#keyEpochText'),
+    accountDialog: document.querySelector('#accountDialog'),
+    sessionsList: document.querySelector('#sessionsList'),
+    devicesList: document.querySelector('#devicesList'),
+    auditSection: document.querySelector('#auditSection'),
+    auditList: document.querySelector('#auditList'),
     viewerDialog: document.querySelector('#viewerDialog'),
     viewerImage: document.querySelector('#viewerImage')
   };
@@ -125,16 +138,55 @@
     return bytes;
   }
 
-  async function deriveChatKey(phrase, saltBase64) {
+  function concatBytes(...chunks) {
+    const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const result = new Uint8Array(total);
+    let offset = 0;
+
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    return result;
+  }
+
+  function normalizeEpoch(value) {
+    const epoch = Number(value || 1);
+    if (!Number.isSafeInteger(epoch) || epoch < 1) {
+      throw new Error('Invalid session epoch.');
+    }
+
+    return epoch;
+  }
+
+  function setSessionEpoch(value) {
+    const epoch = normalizeEpoch(value);
+    state.sessionEpoch = Math.max(state.sessionEpoch || 1, epoch);
+    updateKeyUi();
+  }
+
+  function formatFingerprint(bytes) {
+    const hex = [...bytes.slice(0, 16)].map((byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+    return hex.match(/.{1,4}/g).join(' ');
+  }
+
+  async function fingerprintForRoot(rootBytes) {
+    const context = encoder.encode('chat-with-me key fingerprint v1');
+    const digest = await window.crypto.subtle.digest('SHA-256', concatBytes(context, rootBytes));
+    return formatFingerprint(new Uint8Array(digest));
+  }
+
+  async function deriveChatSecret(phrase, saltBase64) {
     const imported = await window.crypto.subtle.importKey(
       'raw',
       encoder.encode(phrase),
       'PBKDF2',
       false,
-      ['deriveKey']
+      ['deriveBits']
     );
 
-    return window.crypto.subtle.deriveKey(
+    const rootBits = await window.crypto.subtle.deriveBits(
       {
         name: 'PBKDF2',
         salt: base64ToBytes(saltBase64),
@@ -142,32 +194,72 @@
         hash: 'SHA-256'
       },
       imported,
+      256
+    );
+    const rootBytes = new Uint8Array(rootBits);
+    const rootKey = await window.crypto.subtle.importKey(
+      'raw',
+      rootBytes,
+      'HKDF',
+      false,
+      ['deriveKey']
+    );
+    const fingerprint = await fingerprintForRoot(rootBytes);
+    rootBytes.fill(0);
+
+    return { fingerprint, rootKey };
+  }
+
+  async function getEpochKey(epochValue) {
+    const epoch = normalizeEpoch(epochValue);
+    if (state.cryptoKeyCache.has(epoch)) {
+      return state.cryptoKeyCache.get(epoch);
+    }
+
+    if (!state.cryptoRootKey) {
+      throw new Error('Unlock the chat first.');
+    }
+
+    const key = await window.crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: base64ToBytes(state.setup.cryptoSalt),
+        info: encoder.encode(`chat-with-me session epoch ${epoch}`)
+      },
+      state.cryptoRootKey,
       { name: 'AES-GCM', length: 256 },
       false,
       ['encrypt', 'decrypt']
     );
+    state.cryptoKeyCache.set(epoch, key);
+    return key;
   }
 
   async function encryptBytes(bytes) {
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const epoch = normalizeEpoch(state.sessionEpoch);
+    const key = await getEpochKey(epoch);
     const ciphertext = await window.crypto.subtle.encrypt(
       { name: 'AES-GCM', iv },
-      state.cryptoKey,
+      key,
       bytes
     );
 
     return {
       v: 1,
       alg: 'AES-GCM',
+      epoch,
       iv: bytesToBase64(iv),
       ciphertext: bytesToBase64(ciphertext)
     };
   }
 
   async function decryptBytes(envelope) {
+    const key = await getEpochKey(envelope && envelope.epoch ? envelope.epoch : 1);
     const plaintext = await window.crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: base64ToBytes(envelope.iv) },
-      state.cryptoKey,
+      key,
       base64ToBytes(envelope.ciphertext)
     );
 
@@ -203,8 +295,10 @@
     state.setup = {
       ...(state.setup || {}),
       cryptoSalt: payload.cryptoSalt || (state.setup && state.setup.cryptoSalt),
+      sessionEpoch: payload.sessionEpoch || (state.setup && state.setup.sessionEpoch) || 1,
       maxUploadMb: payload.maxUploadMb || (state.setup && state.setup.maxUploadMb)
     };
+    setSessionEpoch(state.setup.sessionEpoch);
     els.unlockName.textContent = state.me.displayName;
     showAuthNotice('');
     setView('unlock');
@@ -267,13 +361,17 @@
 
     state.me = null;
     state.people = [];
-    state.cryptoKey = null;
+    state.cryptoRootKey = null;
+    state.cryptoKeyCache.clear();
+    state.keyFingerprint = '';
     state.socket = null;
     state.messages = [];
     state.decryptedMessages.clear();
     state.attachmentCache.clear();
     state.onlineUserIds = [];
     state.olderExhausted = false;
+    state.sessionEpoch = 1;
+    updateKeyUi();
     setUploadLine('');
   }
 
@@ -283,8 +381,11 @@
       state.socket = null;
     }
 
-    state.cryptoKey = null;
+    state.cryptoRootKey = null;
+    state.cryptoKeyCache.clear();
+    state.keyFingerprint = '';
     state.decryptedMessages.clear();
+    updateKeyUi();
     setView('unlock');
   }
 
@@ -294,8 +395,12 @@
 
     try {
       const phrase = els.unlockForm.elements.phrase.value;
-      state.cryptoKey = await deriveChatKey(phrase, state.setup.cryptoSalt);
+      const secret = await deriveChatSecret(phrase, state.setup.cryptoSalt);
+      state.cryptoRootKey = secret.rootKey;
+      state.cryptoKeyCache.clear();
+      state.keyFingerprint = secret.fingerprint;
       els.unlockForm.reset();
+      updateKeyUi();
       setView('chat');
       connectSocket();
       await loadMessages({ stickToBottom: true });
@@ -326,6 +431,12 @@
     state.socket.on('presence:update', (payload) => {
       state.onlineUserIds = payload.onlineUserIds || [];
       renderPresence();
+    });
+
+    state.socket.on('crypto:epoch', (payload) => {
+      if (payload && payload.sessionEpoch) {
+        setSessionEpoch(payload.sessionEpoch);
+      }
     });
 
     state.socket.on('message:new', async (message) => {
@@ -382,6 +493,9 @@
 
     for (const message of messages) {
       const previous = map.get(message.id) || {};
+      if (message.payload && message.payload.epoch) {
+        setSessionEpoch(message.payload.epoch);
+      }
       map.set(message.id, { ...previous, ...message });
     }
 
@@ -457,17 +571,42 @@
       return row;
     }
 
-    if (message.type === 'text') {
+    const kind = messageKind(message, decrypted.data);
+    if (kind === 'text') {
       const text = document.createElement('p');
       text.className = 'message-text';
       text.textContent = decrypted.data.text || '';
       bubble.append(text);
+    } else if (kind === 'photo' || kind === 'voice') {
+      bubble.append(await buildMediaNode(message, decrypted.data, kind));
     } else {
-      bubble.append(await buildMediaNode(message, decrypted.data));
+      bubble.classList.add('deleted');
+      bubble.textContent = 'Unknown message';
+      return row;
     }
 
     bubble.append(buildMessageMeta(message));
     return row;
+  }
+
+  function messageKind(message, data) {
+    if (data && ['text', 'photo', 'voice'].includes(data.kind)) {
+      return data.kind;
+    }
+
+    if (message && ['text', 'photo', 'voice'].includes(message.type)) {
+      return message.type;
+    }
+
+    if (data && typeof data.text === 'string') {
+      return 'text';
+    }
+
+    if (data && data.attachmentId) {
+      return String(data.mime || '').startsWith('image/') ? 'photo' : 'voice';
+    }
+
+    return null;
   }
 
   async function getDecryptedMessage(message) {
@@ -487,20 +626,20 @@
     }
   }
 
-  async function buildMediaNode(message, data) {
+  async function buildMediaNode(message, data, kind) {
     const frame = document.createElement('div');
     frame.className = 'media-frame';
 
     const placeholder = document.createElement('div');
     placeholder.className = 'media-placeholder';
-    placeholder.textContent = message.type === 'photo' ? 'Photo' : 'Voice message';
+    placeholder.textContent = kind === 'photo' ? 'Photo' : 'Voice message';
     frame.append(placeholder);
 
     try {
-      const media = await loadAttachment(message, data);
+      const media = await loadAttachment(message, data, kind);
       frame.replaceChildren();
 
-      if (message.type === 'photo') {
+      if (kind === 'photo') {
         const image = document.createElement('img');
         image.src = media.url;
         image.alt = data.name || 'Photo message';
@@ -520,7 +659,7 @@
     return frame;
   }
 
-  async function loadAttachment(message, data) {
+  async function loadAttachment(message, data, kind) {
     const attachmentId = message.attachmentId || data.attachmentId;
     if (!attachmentId) {
       throw new Error('Attachment missing.');
@@ -541,7 +680,7 @@
     const envelope = await response.json();
     const bytes = await decryptBytes(envelope);
     const blob = new Blob([bytes], {
-      type: data.mime || (message.type === 'photo' ? 'image/jpeg' : 'audio/webm')
+      type: data.mime || (kind === 'photo' ? 'image/jpeg' : 'audio/webm')
     });
     const media = {
       blob,
@@ -647,9 +786,8 @@
     setUploadLine('');
 
     try {
-      const payload = await encryptJson({ text });
+      const payload = await encryptJson({ kind: 'text', text });
       await emitMessage({
-        type: 'text',
         payload,
         expiresInMs: Number(els.expirySelect.value || 0),
         clientId: window.crypto.randomUUID()
@@ -665,7 +803,7 @@
   }
 
   async function sendMedia(kind, blob, meta) {
-    if (!state.cryptoKey) {
+    if (!state.cryptoRootKey) {
       throw new Error('Unlock the chat first.');
     }
 
@@ -683,8 +821,7 @@
       method: 'POST',
       credentials: 'same-origin',
       headers: {
-        'Content-Type': 'application/json',
-        'x-attachment-kind': kind
+        'Content-Type': 'application/json'
       },
       body: rawBody
     });
@@ -702,7 +839,6 @@
 
     setUploadLine(`Sending ${kind}`);
     await emitMessage({
-      type: kind,
       payload,
       attachmentId: uploadPayload.attachmentId,
       expiresInMs: Number(els.expirySelect.value || 0),
@@ -879,6 +1015,132 @@
     }
   }
 
+  function updateKeyUi() {
+    if (els.keyFingerprintOutput) {
+      els.keyFingerprintOutput.textContent = state.keyFingerprint || 'Locked';
+    }
+
+    if (els.keyEpochText) {
+      els.keyEpochText.textContent = `Epoch ${state.sessionEpoch || 1}`;
+    }
+
+    if (els.keyButton) {
+      els.keyButton.disabled = !state.keyFingerprint;
+    }
+  }
+
+  function openKeyDialog() {
+    updateKeyUi();
+    if (typeof els.keyDialog.showModal === 'function') {
+      els.keyDialog.showModal();
+    }
+  }
+
+  function shortUserAgent(value) {
+    const text = String(value || 'Unknown browser').replace(/\s+/g, ' ').trim();
+    return text.length > 96 ? `${text.slice(0, 93)}...` : text;
+  }
+
+  function buildSecurityItem(item, kind) {
+    const row = document.createElement('li');
+    row.className = 'security-item';
+
+    const details = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = item.label || (kind === 'session' ? 'Browser session' : 'Verified device');
+    if (item.current) {
+      const current = document.createElement('span');
+      current.className = 'current-pill';
+      current.textContent = 'Current';
+      title.append(' ', current);
+    }
+
+    const meta = document.createElement('p');
+    const seen = item.lastSeenAt ? `Last seen ${formatShortDate(item.lastSeenAt)}` : 'Not seen yet';
+    meta.textContent = `${seen} - ${shortUserAgent(item.userAgent)}`;
+    details.append(title, meta);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ghost revoke-button';
+    button.dataset.revokeKind = kind;
+    button.dataset.revokeId = item.id;
+    button.textContent = 'Revoke';
+
+    row.append(details, button);
+    return row;
+  }
+
+  function renderSecurityList(container, items, kind) {
+    container.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('li');
+      empty.className = 'security-empty';
+      empty.textContent = 'Nothing active';
+      container.append(empty);
+      return;
+    }
+
+    for (const item of items) {
+      container.append(buildSecurityItem(item, kind));
+    }
+  }
+
+  function renderAuditLogs(logs) {
+    els.auditList.replaceChildren();
+    if (!logs.length) {
+      const empty = document.createElement('li');
+      empty.className = 'security-empty';
+      empty.textContent = 'No audit events yet';
+      els.auditList.append(empty);
+      return;
+    }
+
+    for (const log of logs) {
+      const row = document.createElement('li');
+      row.className = 'audit-item';
+      const title = document.createElement('strong');
+      title.textContent = log.event;
+      const meta = document.createElement('p');
+      meta.textContent = formatShortDate(log.createdAt);
+      row.append(title, meta);
+      els.auditList.append(row);
+    }
+  }
+
+  async function openAccountDialog() {
+    setUploadLine('');
+    try {
+      const payload = await api('/api/account/security');
+      renderSecurityList(els.sessionsList, payload.sessions || [], 'session');
+      renderSecurityList(els.devicesList, payload.devices || [], 'device');
+      els.auditSection.hidden = !payload.canViewAudit;
+      if (payload.canViewAudit) {
+        renderAuditLogs(payload.auditLogs || []);
+      }
+
+      if (!els.accountDialog.open && typeof els.accountDialog.showModal === 'function') {
+        els.accountDialog.showModal();
+      }
+    } catch (error) {
+      setUploadLine(error.message);
+    }
+  }
+
+  async function revokeSecurityItem(kind, id) {
+    const path = kind === 'session' ? `/api/account/sessions/${encodeURIComponent(id)}` : `/api/account/devices/${encodeURIComponent(id)}`;
+    const payload = await api(path, { method: 'DELETE' });
+
+    if (payload.revokedCurrent && kind === 'session') {
+      clearLocalSession();
+      await refreshSetup();
+      renderAuth();
+      return;
+    }
+
+    await openAccountDialog();
+  }
+
   async function init() {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -903,6 +1165,8 @@
   els.lockButton.addEventListener('click', lockChat);
   els.inviteButton.addEventListener('click', createInvite);
   els.codesButton.addEventListener('click', rotateRecoveryCodes);
+  els.keyButton.addEventListener('click', openKeyDialog);
+  els.accountButton.addEventListener('click', openAccountDialog);
   els.loadOlderButton.addEventListener('click', async () => {
     const first = state.messages[0];
     if (first) {
@@ -947,6 +1211,19 @@
 
   els.copyCodesButton.addEventListener('click', async () => {
     await navigator.clipboard.writeText(els.codesOutput.value);
+  });
+
+  els.accountDialog.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-revoke-kind]');
+    if (!button) return;
+
+    button.disabled = true;
+    try {
+      await revokeSecurityItem(button.dataset.revokeKind, button.dataset.revokeId);
+    } catch (error) {
+      setUploadLine(error.message);
+      button.disabled = false;
+    }
   });
 
   els.viewerDialog.addEventListener('close', () => {

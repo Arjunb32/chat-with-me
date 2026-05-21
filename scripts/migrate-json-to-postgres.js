@@ -30,7 +30,13 @@ async function main() {
         VALUES ('main', $1::jsonb)
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
       `,
-      [JSON.stringify({ cryptoSalt: db.cryptoSalt, maxUsers: (db.settings && db.settings.maxUsers) || 2 })]
+      [
+        JSON.stringify({
+          cryptoSalt: db.cryptoSalt,
+          maxUsers: (db.settings && db.settings.maxUsers) || 2,
+          cryptoEpoch: (db.settings && db.settings.cryptoEpoch) || 1
+        })
+      ]
     );
 
     for (const user of db.users || []) {
@@ -131,7 +137,7 @@ async function main() {
         [
           attachment.id,
           attachment.ownerId,
-          attachment.kind,
+          attachment.kind || 'encrypted',
           attachment.byteLength,
           s3KeyForAttachment(attachment),
           attachment.createdAt,
@@ -157,7 +163,7 @@ async function main() {
         [
           message.id,
           message.senderId,
-          message.type,
+          message.type || 'sealed',
           message.payload ? JSON.stringify(message.payload) : null,
           message.attachmentId,
           message.createdAt,
@@ -165,6 +171,25 @@ async function main() {
           message.deletedAt,
           JSON.stringify(message.deliveredBy || {}),
           JSON.stringify(message.readBy || {})
+        ]
+      );
+    }
+
+    for (const log of db.auditLogs || []) {
+      await client.query(
+        `
+          INSERT INTO audit_logs (id, actor_id, event, metadata, ip_hash, user_agent_hash, created_at)
+          VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
+          ON CONFLICT (id) DO NOTHING
+        `,
+        [
+          log.id,
+          log.actorId,
+          log.event,
+          JSON.stringify(log.metadata || {}),
+          log.ipHash,
+          log.userAgentHash,
+          log.createdAt
         ]
       );
     }

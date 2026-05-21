@@ -1,4 +1,5 @@
 node_modules/
+.tools/
 data/db.json
 storage/attachments/
 backups/

@@ -409,6 +409,96 @@ label {
   min-height: 110px;
 }
 
+.account-modal {
+  width: min(760px, calc(100% - 24px));
+}
+
+.fingerprint-panel {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.fingerprint-panel code {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.98rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.fingerprint-panel span {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.security-section {
+  display: grid;
+  gap: 8px;
+}
+
+.security-section h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.security-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.security-item,
+.audit-item,
+.security-empty {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.security-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.security-item strong,
+.audit-item strong {
+  display: block;
+  font-size: 0.92rem;
+}
+
+.security-item p,
+.audit-item p,
+.security-empty {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.current-pill {
+  display: inline-block;
+  border-radius: 999px;
+  background: rgba(20, 124, 114, 0.12);
+  color: var(--teal);
+  font-size: 0.68rem;
+  padding: 2px 7px;
+  vertical-align: middle;
+}
+
+.revoke-button {
+  min-height: 34px;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

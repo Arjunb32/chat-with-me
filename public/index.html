@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f35f4c">
     <title>Chat With Me</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260504-3">
-    <link rel="stylesheet" href="/styles.css?v=20260504-3">
+    <link rel="manifest" href="/manifest.webmanifest?v=20260521-1">
+    <link rel="stylesheet" href="/styles.css?v=20260521-1">
   </head>
   <body>
     <section id="authView" class="auth-view">
@@ -103,6 +103,8 @@
         <div class="header-actions">
           <button id="inviteButton" type="button">Invite</button>
           <button id="codesButton" type="button" class="ghost">Codes</button>
+          <button id="keyButton" type="button" class="ghost">Key</button>
+          <button id="accountButton" type="button" class="ghost">Account</button>
           <button id="lockButton" type="button" class="ghost">Lock</button>
           <button id="logoutButton" type="button" class="ghost">Logout</button>
         </div>
@@ -157,6 +159,40 @@
       </form>
     </dialog>
 
+    <dialog id="keyDialog" class="modal">
+      <form method="dialog">
+        <h2>Key fingerprint</h2>
+        <div class="fingerprint-panel">
+          <code id="keyFingerprintOutput">Locked</code>
+          <span id="keyEpochText">Epoch 1</span>
+        </div>
+        <div class="modal-actions">
+          <button type="submit" class="ghost">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="accountDialog" class="modal account-modal">
+      <form method="dialog">
+        <h2>Account security</h2>
+        <section class="security-section">
+          <h3>Sessions</h3>
+          <ul id="sessionsList" class="security-list"></ul>
+        </section>
+        <section class="security-section">
+          <h3>Devices</h3>
+          <ul id="devicesList" class="security-list"></ul>
+        </section>
+        <section id="auditSection" class="security-section" hidden>
+          <h3>Audit log</h3>
+          <ul id="auditList" class="security-list audit-list"></ul>
+        </section>
+        <div class="modal-actions">
+          <button type="submit" class="ghost">Close</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="viewerDialog" class="viewer">
       <form method="dialog">
         <button type="submit" class="viewer-close" aria-label="Close">Close</button>
@@ -165,6 +201,6 @@
     </dialog>
 
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/app.js?v=20260504-3"></script>
+    <script src="/app.js?v=20260521-1"></script>
   </body>
 </html>
