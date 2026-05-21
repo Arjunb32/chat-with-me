@@ -160,7 +160,7 @@ class PostgresStore {
       CREATE TABLE IF NOT EXISTS attachments (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        kind TEXT NOT NULL CHECK (kind IN ('photo', 'voice')),
+        kind TEXT NOT NULL CHECK (kind IN ('encrypted', 'photo', 'voice')),
         byte_length BIGINT NOT NULL,
         storage_key TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -170,7 +170,7 @@ class PostgresStore {
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         sender_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        type TEXT NOT NULL CHECK (type IN ('text', 'photo', 'voice')),
+        type TEXT NOT NULL CHECK (type IN ('sealed', 'text', 'photo', 'voice')),
         payload JSONB,
         attachment_id TEXT REFERENCES attachments(id) ON DELETE SET NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -180,10 +180,28 @@ class PostgresStore {
         read_by JSONB NOT NULL DEFAULT '{}'::jsonb
       );
 
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        event TEXT NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        ip_hash TEXT,
+        user_agent_hash TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
       CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
       CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages(expires_at) WHERE expires_at IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
       CREATE INDEX IF NOT EXISTS idx_attachments_deleted_at ON attachments(deleted_at);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE attachments DROP CONSTRAINT IF EXISTS attachments_kind_check;
+      ALTER TABLE attachments ADD CONSTRAINT attachments_kind_check CHECK (kind IN ('encrypted', 'photo', 'voice'));
+      ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_type_check;
+      ALTER TABLE messages ADD CONSTRAINT messages_type_check CHECK (type IN ('sealed', 'text', 'photo', 'voice'));
     `);
 
     await this.pool.query(
@@ -192,8 +210,14 @@ class PostgresStore {
         VALUES ('main', $1::jsonb)
         ON CONFLICT (key) DO NOTHING
       `,
-      [JSON.stringify({ cryptoSalt: randomSalt(), maxUsers: 2 })]
+      [JSON.stringify({ cryptoSalt: randomSalt(), maxUsers: 2, cryptoEpoch: 1 })]
     );
+
+    await this.pool.query(`
+      UPDATE app_settings
+      SET value = jsonb_set(value, '{cryptoEpoch}', COALESCE(value -> 'cryptoEpoch', '1'::jsonb), true)
+      WHERE key = 'main'
+    `);
   }
 
   async withTransaction(callback) {
@@ -214,7 +238,11 @@ class PostgresStore {
 
   async getSettings(client = this.pool) {
     const { rows } = await client.query("SELECT value FROM app_settings WHERE key = 'main'");
-    return rows[0].value;
+    return {
+      cryptoEpoch: 1,
+      maxUsers: 2,
+      ...rows[0].value
+    };
   }
 
   async getStatus() {
@@ -225,6 +253,7 @@ class PostgresStore {
 
     return {
       cryptoSalt: settings.cryptoSalt,
+      sessionEpoch: Number(settings.cryptoEpoch || 1),
       userCount,
       maxUsers,
       needsOwner: userCount === 0,
@@ -236,6 +265,68 @@ class PostgresStore {
   async listPublicUsers() {
     const { rows } = await this.pool.query('SELECT * FROM users ORDER BY created_at ASC');
     return rows.map((row) => toPublicUser(rowToUser(row)));
+  }
+
+  async advanceCryptoEpoch() {
+    return this.withTransaction(async (client) => {
+      const settings = await this.getSettings(client);
+      const nextEpoch = Number(settings.cryptoEpoch || 1) + 1;
+      await client.query(
+        `
+          UPDATE app_settings
+          SET value = jsonb_set(value, '{cryptoEpoch}', $1::jsonb, true)
+          WHERE key = 'main'
+        `,
+        [JSON.stringify(nextEpoch)]
+      );
+      return nextEpoch;
+    });
+  }
+
+  publicAuditLog(row) {
+    return {
+      id: row.id,
+      actorId: row.actor_id || null,
+      event: row.event,
+      metadata: row.metadata || {},
+      ipHash: row.ip_hash || null,
+      userAgentHash: row.user_agent_hash || null,
+      createdAt: iso(row.created_at)
+    };
+  }
+
+  async addAuditLog({ actorId = null, event, metadata = {}, ipHash = null, userAgentHash = null }) {
+    const { rows } = await this.pool.query(
+      `
+        INSERT INTO audit_logs (id, actor_id, event, metadata, ip_hash, user_agent_hash)
+        VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+        RETURNING *
+      `,
+      [
+        `aud_${randomToken(12)}`,
+        actorId,
+        String(event || 'unknown').slice(0, 120),
+        JSON.stringify(metadata && typeof metadata === 'object' ? metadata : {}),
+        ipHash,
+        userAgentHash
+      ]
+    );
+
+    return this.publicAuditLog(rows[0]);
+  }
+
+  async listAuditLogs({ limit = 80 } = {}) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 80, 200));
+    const { rows } = await this.pool.query(
+      `
+        SELECT *
+        FROM audit_logs
+        ORDER BY created_at DESC
+        LIMIT $1
+      `,
+      [safeLimit]
+    );
+    return rows.map((row) => this.publicAuditLog(row));
   }
 
   async getUserById(userId) {
@@ -396,6 +487,36 @@ class PostgresStore {
     return rowToSession(rows[0]);
   }
 
+  publicSession(session, currentSessionId) {
+    return {
+      id: session.id,
+      userAgent: session.userAgent || '',
+      createdAt: session.createdAt,
+      lastSeenAt: session.lastSeenAt,
+      expiresAt: session.expiresAt,
+      current: session.id === currentSessionId
+    };
+  }
+
+  async listUserSessions({ userId, currentSessionId }) {
+    await this.pool.query('DELETE FROM sessions WHERE expires_at <= now()');
+    const { rows } = await this.pool.query(
+      `
+        SELECT *
+        FROM sessions
+        WHERE user_id = $1
+        ORDER BY last_seen_at DESC, created_at DESC
+      `,
+      [userId]
+    );
+    return rows.map((row) => this.publicSession(rowToSession(row), currentSessionId));
+  }
+
+  async deleteSessionById({ userId, sessionId }) {
+    const result = await this.pool.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, sessionId]);
+    return result.rowCount > 0;
+  }
+
   async createVerifiedDevice({ userId, tokenHash, label, userAgent, ip }) {
     const { rows } = await this.pool.query(
       `
@@ -428,6 +549,50 @@ class PostgresStore {
     );
 
     return rows[0] || null;
+  }
+
+  publicDevice(device, currentDeviceTokenHash) {
+    return {
+      id: device.id,
+      label: device.label || 'Verified device',
+      userAgent: device.userAgent || '',
+      createdAt: iso(device.created_at || device.createdAt),
+      lastSeenAt: iso(device.last_seen_at || device.lastSeenAt),
+      revokedAt: iso(device.revoked_at || device.revokedAt),
+      current: Boolean(currentDeviceTokenHash && (device.token_hash || device.tokenHash) === currentDeviceTokenHash)
+    };
+  }
+
+  async listVerifiedDevices({ userId, currentDeviceTokenHash }) {
+    const { rows } = await this.pool.query(
+      `
+        SELECT *
+        FROM verified_devices
+        WHERE user_id = $1 AND revoked_at IS NULL
+        ORDER BY last_seen_at DESC, created_at DESC
+      `,
+      [userId]
+    );
+    return rows.map((row) => this.publicDevice(row, currentDeviceTokenHash));
+  }
+
+  async revokeVerifiedDevice({ userId, deviceId }) {
+    const { rows } = await this.pool.query(
+      `
+        UPDATE verified_devices
+        SET revoked_at = now()
+        WHERE user_id = $1 AND id = $2 AND revoked_at IS NULL
+        RETURNING *
+      `,
+      [userId, deviceId]
+    );
+
+    return rows[0] ? this.publicDevice(rows[0]) : null;
+  }
+
+  async updatePasswordHash({ userId, passwordHash }) {
+    const result = await this.pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
+    return result.rowCount > 0;
   }
 
   async hasActiveRecoveryCodes(userId) {
@@ -518,14 +683,14 @@ class PostgresStore {
     return result.rowCount > 0;
   }
 
-  async addAttachment({ id, ownerId, kind, byteLength, filename }) {
+  async addAttachment({ id, ownerId, kind = 'encrypted', byteLength, filename }) {
     const { rows } = await this.pool.query(
       `
         INSERT INTO attachments (id, owner_id, kind, byte_length, storage_key)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING *
       `,
-      [id, ownerId, kind, byteLength, filename]
+      [id, ownerId, String(kind || 'encrypted').slice(0, 40), byteLength, filename]
     );
 
     return rowToAttachment(rows[0]);
@@ -540,7 +705,6 @@ class PostgresStore {
     return {
       id: message.id,
       senderId: message.senderId,
-      type: message.type,
       payload: message.deletedAt ? null : message.payload,
       attachmentId: message.deletedAt ? null : message.attachmentId,
       createdAt: message.createdAt,
@@ -551,7 +715,7 @@ class PostgresStore {
     };
   }
 
-  async addMessage({ senderId, type, payload, attachmentId, expiresAt, deliveredTo = [] }) {
+  async addMessage({ senderId, payload, attachmentId, expiresAt, deliveredTo = [] }) {
     const deliveredBy = {
       [senderId]: new Date().toISOString()
     };
@@ -569,7 +733,7 @@ class PostgresStore {
       [
         `msg_${randomToken(12)}`,
         senderId,
-        type,
+        'sealed',
         JSON.stringify(payload),
         attachmentId || null,
         expiresAt || null,

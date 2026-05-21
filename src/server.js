@@ -12,6 +12,11 @@ const { Server } = require('socket.io');
 
 const JsonStore = require('./store');
 const PostgresStore = require('./postgres-store');
+const {
+  isEncryptionEnvelope,
+  validateAttachmentEnvelope,
+  validateMessageInput
+} = require('./envelope');
 const { createMediaStorage } = require('./media-storage');
 const {
   DEVICE_COOKIE,
@@ -21,6 +26,7 @@ const {
   cleanRecoveryCode,
   hashPassword,
   normalizeDisplayName,
+  passwordNeedsRehash,
   randomToken,
   sha256,
   validatePassword,
@@ -48,23 +54,70 @@ const onlineUsers = new Map();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
+function exactWebSocketOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
+}
+
+function buildCspDirectives() {
+  const connectSrc = ["'self'"];
+  const publicOrigin = process.env.PUBLIC_ORIGIN;
+  const websocketOrigin = publicOrigin && exactWebSocketOrigin(publicOrigin);
+
+  if (publicOrigin) {
+    connectSrc.push(publicOrigin);
+  }
+
+  if (websocketOrigin) {
+    connectSrc.push(websocketOrigin);
+  }
+
+  if (!IS_PRODUCTION) {
+    connectSrc.push('ws://localhost:*', 'ws://127.0.0.1:*');
+  }
+
+  const directives = {
+    defaultSrc: ["'none'"],
+    baseUri: ["'self'"],
+    connectSrc,
+    fontSrc: ["'self'"],
+    formAction: ["'self'"],
+    frameAncestors: ["'none'"],
+    frameSrc: ["'none'"],
+    imgSrc: ["'self'", 'blob:'],
+    manifestSrc: ["'self'"],
+    mediaSrc: ["'self'", 'blob:'],
+    objectSrc: ["'none'"],
+    prefetchSrc: ["'none'"],
+    scriptSrc: ["'self'"],
+    scriptSrcAttr: ["'none'"],
+    styleSrc: ["'self'"],
+    workerSrc: ["'self'"]
+  };
+
+  if (IS_PRODUCTION) {
+    directives.upgradeInsecureRequests = [];
+  }
+
+  if (process.env.CSP_REPORT_URI) {
+    directives.reportUri = [process.env.CSP_REPORT_URI];
+  }
+
+  return directives;
+}
+
 app.use(
   helmet({
     crossOriginEmbedderPolicy: false,
     contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        baseUri: ["'self'"],
-        connectSrc: ["'self'", 'ws:', 'wss:'],
-        fontSrc: ["'self'"],
-        formAction: ["'self'"],
-        frameAncestors: ["'none'"],
-        imgSrc: ["'self'", 'blob:', 'data:'],
-        mediaSrc: ["'self'", 'blob:'],
-        objectSrc: ["'none'"],
-        scriptSrc: ["'self'"],
-        styleSrc: ["'self'"]
-      }
+      useDefaults: false,
+      directives: buildCspDirectives(),
+      reportOnly: process.env.CSP_REPORT_ONLY === 'true'
     }
   })
 );
@@ -129,8 +182,45 @@ function clearSessionCookie(res) {
   });
 }
 
+function clearDeviceCookie(res) {
+  res.clearCookie(DEVICE_COOKIE, {
+    httpOnly: true,
+    secure: IS_PRODUCTION,
+    sameSite: 'strict',
+    path: '/'
+  });
+}
+
 function sendError(res, status, message) {
   res.status(status).json({ error: message });
+}
+
+function safeMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(metadata)
+      .filter(([, value]) => {
+        return value === null || ['string', 'number', 'boolean'].includes(typeof value);
+      })
+      .slice(0, 12)
+  );
+}
+
+async function audit(req, event, { actorId = null, metadata = {} } = {}) {
+  try {
+    await store.addAuditLog({
+      actorId,
+      event,
+      metadata: safeMetadata(metadata),
+      ipHash: req && req.ip ? sha256(req.ip) : null,
+      userAgentHash: req ? sha256(req.get('user-agent') || '') : null
+    });
+  } catch (error) {
+    console.error('Audit log write failed:', error);
+  }
 }
 
 async function sessionFromToken(token) {
@@ -150,7 +240,7 @@ async function isDeviceVerified(req, userId) {
 
 async function createSessionAndCookies({ res, req, user }) {
   const sessionToken = randomToken(32);
-  await store.createSession({
+  const session = await store.createSession({
     userId: user.id,
     tokenHash: sha256(sessionToken),
     userAgent: req.get('user-agent'),
@@ -167,6 +257,18 @@ async function createSessionAndCookies({ res, req, user }) {
     ip: req.ip
   });
   setDeviceCookie(res, deviceToken);
+
+  const sessionEpoch = await store.advanceCryptoEpoch();
+  io.to('private-chat').emit('crypto:epoch', { sessionEpoch });
+  await audit(req, 'session.created', {
+    actorId: user.id,
+    metadata: {
+      sessionId: session.id,
+      sessionEpoch
+    }
+  });
+
+  return { session, sessionEpoch };
 }
 
 async function requireAuth(req, res, next) {
@@ -184,6 +286,14 @@ async function requireAuth(req, res, next) {
   }
 }
 
+function requireOwner(req, res, next) {
+  if (!req.user || req.user.role !== 'owner') {
+    return sendError(res, 403, 'Only the owner can do that.');
+  }
+
+  return next();
+}
+
 async function buildMePayload(user, extras = {}) {
   const status = await store.getStatus();
   const people = await store.listPublicUsers();
@@ -194,67 +304,6 @@ async function buildMePayload(user, extras = {}) {
     maxUploadMb: MAX_UPLOAD_MB,
     ...extras
   };
-}
-
-function isEncryptionEnvelope(value, maxCiphertextChars = 80_000) {
-  return Boolean(
-    value &&
-      value.v === 1 &&
-      value.alg === 'AES-GCM' &&
-      typeof value.iv === 'string' &&
-      value.iv.length >= 12 &&
-      value.iv.length <= 64 &&
-      typeof value.ciphertext === 'string' &&
-      value.ciphertext.length > 0 &&
-      value.ciphertext.length <= maxCiphertextChars
-  );
-}
-
-function validateMessageInput(input) {
-  if (!input || typeof input !== 'object') {
-    throw new Error('Invalid message.');
-  }
-
-  if (!['text', 'photo', 'voice'].includes(input.type)) {
-    throw new Error('Unsupported message type.');
-  }
-
-  if (!isEncryptionEnvelope(input.payload)) {
-    throw new Error('Invalid encrypted payload.');
-  }
-
-  if ((input.type === 'photo' || input.type === 'voice') && typeof input.attachmentId !== 'string') {
-    throw new Error('Media message needs an attachment.');
-  }
-
-  const expiresInMs = Number(input.expiresInMs || 0);
-  if (expiresInMs < 0 || expiresInMs > 30 * 24 * 60 * 60 * 1000) {
-    throw new Error('Invalid expiration.');
-  }
-
-  return {
-    type: input.type,
-    payload: input.payload,
-    attachmentId: input.attachmentId || null,
-    expiresAt: expiresInMs ? new Date(Date.now() + expiresInMs).toISOString() : null
-  };
-}
-
-function validateAttachmentEnvelope(rawBody) {
-  if (!Buffer.isBuffer(rawBody) || rawBody.length < 32 || rawBody.length > MAX_UPLOAD_BYTES) {
-    throw new Error(`Encrypted file must be between 32 bytes and ${MAX_UPLOAD_MB} MB.`);
-  }
-
-  let envelope;
-  try {
-    envelope = JSON.parse(rawBody.toString('utf8'));
-  } catch {
-    throw new Error('Encrypted file envelope is invalid.');
-  }
-
-  if (!isEncryptionEnvelope(envelope, MAX_UPLOAD_BYTES * 2)) {
-    throw new Error('Encrypted file envelope is invalid.');
-  }
 }
 
 function onlineUserIdsExcept(userId) {
@@ -308,12 +357,7 @@ app.post(
   express.raw({ type: '*/*', limit: `${MAX_UPLOAD_MB}mb` }),
   async (req, res, next) => {
     try {
-      const kind = String(req.get('x-attachment-kind') || '').toLowerCase();
-      if (!['photo', 'voice'].includes(kind)) {
-        return sendError(res, 400, 'Unsupported attachment type.');
-      }
-
-      validateAttachmentEnvelope(req.body);
+      validateAttachmentEnvelope(req.body, MAX_UPLOAD_BYTES, MAX_UPLOAD_MB);
 
       const id = `att_${randomToken(12)}`;
       const filename = mediaStorage.keyForAttachment(id);
@@ -322,14 +366,12 @@ app.post(
       const attachment = await store.addAttachment({
         id,
         ownerId: req.user.id,
-        kind,
         byteLength: req.body.length,
         filename
       });
 
       return res.status(201).json({
         attachmentId: attachment.id,
-        kind: attachment.kind,
         byteLength: attachment.byteLength
       });
     } catch (error) {
@@ -352,6 +394,20 @@ app.get('/api/attachments/:id/blob', requireAuth, async (req, res, next) => {
     return next(error);
   }
 });
+
+app.post(
+  '/api/csp-report',
+  express.json({ type: ['application/csp-report', 'application/reports+json', 'application/json'], limit: '16kb' }),
+  async (req, res) => {
+    await audit(req, 'security.csp_violation', {
+      metadata: {
+        blockedUri: req.body && (req.body['csp-report'] || req.body).blockedURI,
+        violatedDirective: req.body && (req.body['csp-report'] || req.body).violatedDirective
+      }
+    });
+    res.status(204).end();
+  }
+);
 
 app.use(express.json({ limit: '128kb' }));
 
@@ -383,6 +439,8 @@ app.post('/api/setup/owner', authLimiter, async (req, res, next) => {
     const recoveryCodes = await store.rotateRecoveryCodes(user.id);
 
     await createSessionAndCookies({ res, req, user });
+    await audit(req, 'setup.owner_created', { actorId: user.id });
+    await audit(req, 'recovery_codes.rotated', { actorId: user.id });
     res.status(201).json(await buildMePayload(user, { recoveryCodes }));
   } catch (error) {
     next(error);
@@ -399,6 +457,8 @@ app.post('/api/signup', authLimiter, async (req, res, next) => {
     const recoveryCodes = await store.rotateRecoveryCodes(user.id);
 
     await createSessionAndCookies({ res, req, user });
+    await audit(req, 'auth.signup_success', { actorId: user.id });
+    await audit(req, 'recovery_codes.rotated', { actorId: user.id });
     res.status(201).json(await buildMePayload(user, { recoveryCodes }));
   } catch (error) {
     next(error);
@@ -409,11 +469,16 @@ app.post('/api/login', authLimiter, async (req, res, next) => {
   try {
     const userRecord = await store.findUserByDisplayName(req.body.displayName);
     if (!userRecord) {
+      await audit(req, 'auth.login_failed', { metadata: { reason: 'unknown_user' } });
       return sendError(res, 401, 'Display name or password is incorrect.');
     }
 
     const passwordOk = await verifyPassword(req.body.password, userRecord.passwordHash);
     if (!passwordOk) {
+      await audit(req, 'auth.login_failed', {
+        actorId: userRecord.id,
+        metadata: { reason: 'bad_password' }
+      });
       return sendError(res, 401, 'Display name or password is incorrect.');
     }
 
@@ -433,11 +498,23 @@ app.post('/api/login', authLimiter, async (req, res, next) => {
       });
 
       if (!recoveryOk) {
+        await audit(req, 'auth.login_failed', {
+          actorId: user.id,
+          metadata: { reason: 'recovery_required' }
+        });
         return sendError(res, 403, 'Recovery code is required for this new device.');
       }
     }
 
+    if (passwordNeedsRehash(userRecord.passwordHash)) {
+      await store.updatePasswordHash({
+        userId: user.id,
+        passwordHash: await hashPassword(req.body.password)
+      });
+    }
+
     await createSessionAndCookies({ res, req, user });
+    await audit(req, 'auth.login_success', { actorId: user.id });
     res.json(await buildMePayload(user));
   } catch (error) {
     next(error);
@@ -447,6 +524,7 @@ app.post('/api/login', authLimiter, async (req, res, next) => {
 app.post('/api/logout', requireAuth, async (req, res, next) => {
   try {
     await store.deleteSession(sha256(req.cookies[SESSION_COOKIE]));
+    await audit(req, 'auth.logout', { actorId: req.user.id });
     clearSessionCookie(res);
     res.json({ ok: true });
   } catch (error) {
@@ -462,10 +540,93 @@ app.get('/api/me', requireAuth, async (req, res, next) => {
   }
 });
 
+app.get('/api/account/security', requireAuth, async (req, res, next) => {
+  try {
+    const currentDeviceToken = req.cookies[DEVICE_COOKIE];
+    const currentDeviceTokenHash = currentDeviceToken ? sha256(currentDeviceToken) : null;
+    const [sessions, devices, auditLogs] = await Promise.all([
+      store.listUserSessions({ userId: req.user.id, currentSessionId: req.session.id }),
+      store.listVerifiedDevices({ userId: req.user.id, currentDeviceTokenHash }),
+      req.user.role === 'owner' ? store.listAuditLogs({ limit: 80 }) : Promise.resolve([])
+    ]);
+
+    res.json({
+      sessions,
+      devices,
+      auditLogs,
+      canViewAudit: req.user.role === 'owner'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/account/sessions/:id', requireAuth, async (req, res, next) => {
+  try {
+    const revoked = await store.deleteSessionById({
+      userId: req.user.id,
+      sessionId: req.params.id
+    });
+    const revokedCurrent = req.params.id === req.session.id;
+
+    if (revoked) {
+      await audit(req, 'session.revoked', {
+        actorId: req.user.id,
+        metadata: { sessionId: req.params.id, current: revokedCurrent }
+      });
+    }
+
+    if (revokedCurrent) {
+      clearSessionCookie(res);
+    }
+
+    res.json({ ok: true, revoked, revokedCurrent });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/account/devices/:id', requireAuth, async (req, res, next) => {
+  try {
+    const currentDeviceToken = req.cookies[DEVICE_COOKIE];
+    const currentDeviceTokenHash = currentDeviceToken ? sha256(currentDeviceToken) : null;
+    const devices = await store.listVerifiedDevices({ userId: req.user.id, currentDeviceTokenHash });
+    const target = devices.find((device) => device.id === req.params.id);
+    const revoked = await store.revokeVerifiedDevice({
+      userId: req.user.id,
+      deviceId: req.params.id
+    });
+
+    if (revoked) {
+      await audit(req, 'device.revoked', {
+        actorId: req.user.id,
+        metadata: { deviceId: req.params.id, current: Boolean(target && target.current) }
+      });
+    }
+
+    if (target && target.current) {
+      clearDeviceCookie(res);
+    }
+
+    res.json({ ok: true, revoked: Boolean(revoked), revokedCurrent: Boolean(target && target.current) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/audit-logs', requireAuth, requireOwner, async (req, res, next) => {
+  try {
+    res.json({ auditLogs: await store.listAuditLogs({ limit: req.query.limit }) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/invites', requireAuth, async (req, res, next) => {
   try {
     const result = await store.createInvite(req.user.id);
     const origin = process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`;
+    await audit(req, 'invite.created', { actorId: req.user.id, metadata: { inviteId: result.invite.id } });
     res.status(201).json({
       inviteCode: result.token,
       inviteUrl: `${origin}/?invite=${encodeURIComponent(result.token)}`,
@@ -479,6 +640,7 @@ app.post('/api/invites', requireAuth, async (req, res, next) => {
 app.post('/api/recovery-codes', requireAuth, authLimiter, async (req, res, next) => {
   try {
     const recoveryCodes = await store.rotateRecoveryCodes(req.user.id);
+    await audit(req, 'recovery_codes.rotated', { actorId: req.user.id });
     res.status(201).json({ recoveryCodes });
   } catch (error) {
     next(error);
@@ -521,6 +683,8 @@ io.on('connection', async (socket) => {
   emitPresence();
 
   try {
+    const status = await store.getStatus();
+    socket.emit('crypto:epoch', { sessionEpoch: status.sessionEpoch });
     const statuses = await store.markDeliveredForUser(user.id);
     if (statuses.length) {
       io.to('private-chat').emit('message:status', { messages: statuses });
@@ -535,14 +699,13 @@ io.on('connection', async (socket) => {
 
       if (messageInput.attachmentId) {
         const attachment = await store.getAttachment(messageInput.attachmentId);
-        if (!attachment || attachment.deletedAt || attachment.ownerId !== user.id || attachment.kind !== messageInput.type) {
+        if (!attachment || attachment.deletedAt || attachment.ownerId !== user.id) {
           throw new Error('Attachment is invalid for this message.');
         }
       }
 
       const message = await store.addMessage({
         senderId: user.id,
-        type: messageInput.type,
         payload: messageInput.payload,
         attachmentId: messageInput.attachmentId,
         expiresAt: messageInput.expiresAt,
@@ -585,6 +748,10 @@ io.on('connection', async (socket) => {
         await mediaStorage.remove(result.deletedAttachment.filename);
       }
 
+      await audit({ ip: socket.handshake.address, get: (name) => socket.handshake.headers[name.toLowerCase()] }, 'message.deleted', {
+        actorId: user.id,
+        metadata: { messageId }
+      });
       io.to('private-chat').emit('message:deleted', result.message);
       if (typeof ack === 'function') ack({ ok: true });
     } catch (error) {
@@ -648,7 +815,18 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  app,
+  buildCspDirectives,
+  isEncryptionEnvelope,
+  server,
+  validateAttachmentEnvelope,
+  validateMessageInput
+};

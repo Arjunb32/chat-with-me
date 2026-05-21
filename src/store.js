@@ -47,7 +47,8 @@ class Store {
       version: 1,
       cryptoSalt: randomSalt(),
       settings: {
-        maxUsers: 2
+        maxUsers: 2,
+        cryptoEpoch: 1
       },
       users: [],
       sessions: [],
@@ -55,7 +56,8 @@ class Store {
       recoveryCodes: [],
       invites: [],
       messages: [],
-      attachments: []
+      attachments: [],
+      auditLogs: []
     };
   }
 
@@ -64,6 +66,9 @@ class Store {
     this.db.cryptoSalt = this.db.cryptoSalt || randomSalt();
     this.db.settings = this.db.settings || { maxUsers: 2 };
     this.db.settings.maxUsers = this.db.settings.maxUsers || 2;
+    this.db.settings.cryptoEpoch = Number.isSafeInteger(this.db.settings.cryptoEpoch)
+      ? this.db.settings.cryptoEpoch
+      : 1;
     this.db.users = Array.isArray(this.db.users) ? this.db.users : [];
     this.db.sessions = Array.isArray(this.db.sessions) ? this.db.sessions : [];
     this.db.verifiedDevices = Array.isArray(this.db.verifiedDevices) ? this.db.verifiedDevices : [];
@@ -71,6 +76,17 @@ class Store {
     this.db.invites = Array.isArray(this.db.invites) ? this.db.invites : [];
     this.db.messages = Array.isArray(this.db.messages) ? this.db.messages : [];
     this.db.attachments = Array.isArray(this.db.attachments) ? this.db.attachments : [];
+    this.db.auditLogs = Array.isArray(this.db.auditLogs) ? this.db.auditLogs : [];
+
+    for (const message of this.db.messages) {
+      message.type = message.type || 'sealed';
+      message.deliveredBy = message.deliveredBy || {};
+      message.readBy = message.readBy || {};
+    }
+
+    for (const attachment of this.db.attachments) {
+      attachment.kind = attachment.kind || 'encrypted';
+    }
   }
 
   async save() {
@@ -96,6 +112,7 @@ class Store {
 
     return {
       cryptoSalt: this.db.cryptoSalt,
+      sessionEpoch: Number(this.db.settings.cryptoEpoch || 1),
       userCount,
       maxUsers,
       needsOwner: userCount === 0,
@@ -106,6 +123,54 @@ class Store {
 
   listPublicUsers() {
     return this.db.users.map(toPublicUser);
+  }
+
+  async advanceCryptoEpoch() {
+    return this.transact((db) => {
+      db.settings.cryptoEpoch = Number(db.settings.cryptoEpoch || 1) + 1;
+      return db.settings.cryptoEpoch;
+    });
+  }
+
+  publicAuditLog(log) {
+    return {
+      id: log.id,
+      actorId: log.actorId || null,
+      event: log.event,
+      metadata: log.metadata || {},
+      ipHash: log.ipHash || null,
+      userAgentHash: log.userAgentHash || null,
+      createdAt: log.createdAt
+    };
+  }
+
+  async addAuditLog({ actorId = null, event, metadata = {}, ipHash = null, userAgentHash = null }) {
+    return this.transact((db) => {
+      const log = {
+        id: `aud_${randomToken(12)}`,
+        actorId,
+        event: String(event || 'unknown').slice(0, 120),
+        metadata: metadata && typeof metadata === 'object' ? metadata : {},
+        ipHash,
+        userAgentHash,
+        createdAt: new Date().toISOString()
+      };
+
+      db.auditLogs.push(log);
+      if (db.auditLogs.length > 1500) {
+        db.auditLogs = db.auditLogs.slice(-1500);
+      }
+
+      return this.publicAuditLog(log);
+    });
+  }
+
+  async listAuditLogs({ limit = 80 } = {}) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 80, 200));
+    return this.db.auditLogs
+      .slice(-safeLimit)
+      .reverse()
+      .map((log) => this.publicAuditLog(log));
   }
 
   getUserById(userId) {
@@ -228,6 +293,35 @@ class Store {
     });
   }
 
+  publicSession(session, currentSessionId) {
+    return {
+      id: session.id,
+      userAgent: session.userAgent || '',
+      createdAt: session.createdAt,
+      lastSeenAt: session.lastSeenAt,
+      expiresAt: session.expiresAt,
+      current: session.id === currentSessionId
+    };
+  }
+
+  async listUserSessions({ userId, currentSessionId }) {
+    return this.transact((db) => {
+      db.sessions = db.sessions.filter((session) => !isExpired(session.expiresAt));
+      return db.sessions
+        .filter((session) => session.userId === userId)
+        .sort((a, b) => Date.parse(b.lastSeenAt || b.createdAt) - Date.parse(a.lastSeenAt || a.createdAt))
+        .map((session) => this.publicSession(session, currentSessionId));
+    });
+  }
+
+  async deleteSessionById({ userId, sessionId }) {
+    return this.transact((db) => {
+      const before = db.sessions.length;
+      db.sessions = db.sessions.filter((session) => !(session.userId === userId && session.id === sessionId));
+      return before !== db.sessions.length;
+    });
+  }
+
   async createVerifiedDevice({ userId, tokenHash, label, userAgent, ip }) {
     return this.transact((db) => {
       const now = new Date().toISOString();
@@ -257,6 +351,46 @@ class Store {
       if (!device) return null;
       device.lastSeenAt = new Date().toISOString();
       return { ...device };
+    });
+  }
+
+  publicDevice(device, currentDeviceTokenHash) {
+    return {
+      id: device.id,
+      label: device.label || 'Verified device',
+      userAgent: device.userAgent || '',
+      createdAt: device.createdAt,
+      lastSeenAt: device.lastSeenAt,
+      revokedAt: device.revokedAt,
+      current: Boolean(currentDeviceTokenHash && device.tokenHash === currentDeviceTokenHash)
+    };
+  }
+
+  async listVerifiedDevices({ userId, currentDeviceTokenHash }) {
+    return this.db.verifiedDevices
+      .filter((device) => device.userId === userId && !device.revokedAt)
+      .sort((a, b) => Date.parse(b.lastSeenAt || b.createdAt) - Date.parse(a.lastSeenAt || a.createdAt))
+      .map((device) => this.publicDevice(device, currentDeviceTokenHash));
+  }
+
+  async revokeVerifiedDevice({ userId, deviceId }) {
+    return this.transact((db) => {
+      const device = db.verifiedDevices.find((item) => item.userId === userId && item.id === deviceId);
+      if (!device || device.revokedAt) {
+        return null;
+      }
+
+      device.revokedAt = new Date().toISOString();
+      return this.publicDevice(device);
+    });
+  }
+
+  async updatePasswordHash({ userId, passwordHash }) {
+    return this.transact((db) => {
+      const user = db.users.find((item) => item.id === userId);
+      if (!user) return false;
+      user.passwordHash = passwordHash;
+      return true;
     });
   }
 
@@ -335,12 +469,12 @@ class Store {
     });
   }
 
-  async addAttachment({ id, ownerId, kind, byteLength, filename }) {
+  async addAttachment({ id, ownerId, kind = 'encrypted', byteLength, filename }) {
     return this.transact((db) => {
       const attachment = {
         id,
         ownerId,
-        kind,
+        kind: String(kind || 'encrypted').slice(0, 40),
         byteLength,
         filename,
         createdAt: new Date().toISOString(),
@@ -369,7 +503,7 @@ class Store {
     }
   }
 
-  async addMessage({ senderId, type, payload, attachmentId, expiresAt, deliveredTo = [] }) {
+  async addMessage({ senderId, payload, attachmentId, expiresAt, deliveredTo = [] }) {
     return this.transact((db) => {
       const now = new Date().toISOString();
       const deliveredBy = {
@@ -383,7 +517,7 @@ class Store {
       const message = {
         id: `msg_${randomToken(12)}`,
         senderId,
-        type,
+        type: 'sealed',
         payload,
         attachmentId: attachmentId || null,
         createdAt: now,
@@ -402,7 +536,6 @@ class Store {
     return {
       id: message.id,
       senderId: message.senderId,
-      type: message.type,
       payload: message.deletedAt ? null : message.payload,
       attachmentId: message.deletedAt ? null : message.attachmentId,
       createdAt: message.createdAt,
