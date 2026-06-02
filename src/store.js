@@ -4,6 +4,7 @@ const {
   cleanInviteCode,
   futureDate,
   isExpired,
+  normalizeAvatarColor,
   normalizeDisplayName,
   randomSalt,
   randomToken,
@@ -80,12 +81,18 @@ class Store {
 
     for (const message of this.db.messages) {
       message.type = message.type || 'sealed';
+      message.mode = message.mode || 'private';
       message.deliveredBy = message.deliveredBy || {};
       message.readBy = message.readBy || {};
     }
 
     for (const attachment of this.db.attachments) {
       attachment.kind = attachment.kind || 'encrypted';
+    }
+
+    const colors = ['#147c72', '#f35f4c', '#6d5dfc', '#b7791f'];
+    for (const [index, user] of this.db.users.entries()) {
+      user.avatarColor = user.avatarColor || colors[index % colors.length];
     }
   }
 
@@ -123,6 +130,24 @@ class Store {
 
   listPublicUsers() {
     return this.db.users.map(toPublicUser);
+  }
+
+  async listContacts({ excludeUserId } = {}) {
+    return this.db.users
+      .filter((user) => user.id !== excludeUserId)
+      .map((user) => {
+        const sessions = this.db.sessions.filter((session) => session.userId === user.id && !isExpired(session.expiresAt));
+        const lastSeenAt = sessions
+          .map((session) => session.lastSeenAt || session.createdAt)
+          .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || user.createdAt;
+        return {
+          id: user.id,
+          username: user.displayNameKey || user.displayName,
+          displayName: user.displayName,
+          avatarColor: user.avatarColor || '#147c72',
+          lastSeenAt
+        };
+      });
   }
 
   async advanceCryptoEpoch() {
@@ -194,6 +219,7 @@ class Store {
         id: `usr_${randomToken(12)}`,
         displayName: normalized,
         displayNameKey: normalized.toLocaleLowerCase(),
+        avatarColor: '#147c72',
         passwordHash,
         role: 'owner',
         createdAt: new Date().toISOString()
@@ -227,6 +253,7 @@ class Store {
         id: `usr_${randomToken(12)}`,
         displayName: normalized,
         displayNameKey: normalized.toLocaleLowerCase(),
+        avatarColor: '#f35f4c',
         passwordHash,
         role: 'member',
         createdAt: new Date().toISOString()
@@ -394,6 +421,19 @@ class Store {
     });
   }
 
+  async updateProfile({ userId, avatarColor }) {
+    const normalizedColor = normalizeAvatarColor(avatarColor);
+    return this.transact((db) => {
+      const user = db.users.find((item) => item.id === userId);
+      if (!user) {
+        throw new Error('User not found.');
+      }
+
+      user.avatarColor = normalizedColor;
+      return toPublicUser(user);
+    });
+  }
+
   async hasActiveRecoveryCodes(userId) {
     return this.db.recoveryCodes.some((code) => code.userId === userId && !code.usedAt);
   }
@@ -503,7 +543,7 @@ class Store {
     }
   }
 
-  async addMessage({ senderId, payload, attachmentId, expiresAt, deliveredTo = [] }) {
+  async addMessage({ senderId, mode = 'private', payload, attachmentId, expiresAt, deliveredTo = [] }) {
     return this.transact((db) => {
       const now = new Date().toISOString();
       const deliveredBy = {
@@ -517,6 +557,7 @@ class Store {
       const message = {
         id: `msg_${randomToken(12)}`,
         senderId,
+        mode: mode === 'private' ? 'private' : 'standard',
         type: 'sealed',
         payload,
         attachmentId: attachmentId || null,
@@ -536,6 +577,7 @@ class Store {
     return {
       id: message.id,
       senderId: message.senderId,
+      mode: message.mode || 'private',
       payload: message.deletedAt ? null : message.payload,
       attachmentId: message.deletedAt ? null : message.attachmentId,
       createdAt: message.createdAt,

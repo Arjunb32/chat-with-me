@@ -101,9 +101,15 @@
           <p id="presenceText">Offline</p>
         </div>
         <div class="header-actions">
+          <button id="modeToggle" class="mode-toggle" type="button" aria-label="Switch chat mode" aria-pressed="false">
+            <span class="mode-knob" aria-hidden="true"></span>
+            <span id="modeLabel">Standard</span>
+          </button>
+          <button id="contactsButton" type="button" class="ghost" aria-label="Open contacts">People</button>
           <button id="inviteButton" type="button">Invite</button>
           <button id="codesButton" type="button" class="ghost">Codes</button>
           <button id="keyButton" type="button" class="ghost">Key</button>
+          <button id="themeButton" type="button" class="ghost" aria-label="Switch theme">Dark</button>
           <button id="accountButton" type="button" class="ghost">Account</button>
           <button id="lockButton" type="button" class="ghost">Lock</button>
           <button id="logoutButton" type="button" class="ghost">Logout</button>
@@ -117,6 +123,11 @@
 
       <div id="typingLine" class="typing-line" hidden></div>
       <div id="uploadLine" class="upload-line" hidden></div>
+      <div id="recordingPanel" class="preview-panel recording-panel" hidden>
+        <canvas id="recordingCanvas" width="260" height="48" aria-label="Live voice waveform"></canvas>
+        <span id="recordingTimer">00:00</span>
+      </div>
+      <div id="previewPanel" class="preview-panel" hidden></div>
 
       <form id="composerForm" class="composer">
         <button id="photoButton" class="icon-button" type="button" aria-label="Send photo" title="Send photo">
@@ -136,6 +147,16 @@
         <button id="sendButton" type="submit">Send</button>
       </form>
     </section>
+
+    <aside id="contactsPanel" class="contacts-panel" hidden aria-label="Contacts">
+      <div class="contacts-sheet">
+        <div class="contacts-head">
+          <h2>Contacts</h2>
+          <button id="contactsCloseButton" class="ghost" type="button" aria-label="Close contacts">Close</button>
+        </div>
+        <div id="contactsList" class="contacts-list"></div>
+      </div>
+    </aside>
 
     <dialog id="inviteDialog" class="modal">
       <form method="dialog">
@@ -175,6 +196,10 @@
     <dialog id="accountDialog" class="modal account-modal">
       <form method="dialog">
         <h2>Account security</h2>
+        <section class="security-section">
+          <h3>Profile</h3>
+          <div id="profilePanel" class="profile-panel"></div>
+        </section>
         <section class="security-section">
           <h3>Sessions</h3>
           <ul id="sessionsList" class="security-list"></ul>

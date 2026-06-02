@@ -37,6 +37,16 @@ test('validates sealed message input without exposing message type', () => {
   assert.match(input.expiresAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test('validates standard message input without encrypted envelope', () => {
+  const input = validateMessageInput({
+    mode: 'standard',
+    payload: { kind: 'text', text: 'hello' }
+  });
+
+  assert.equal(input.mode, 'standard');
+  assert.deepEqual(input.payload, { kind: 'text', text: 'hello' });
+});
+
 test('rejects attachment envelopes with date-string epochs', () => {
   const body = Buffer.from(JSON.stringify(envelope({ epoch: '2026-05-21' })));
   assert.throws(() => validateAttachmentEnvelope(body, 1024, 1), /Encrypted file envelope is invalid/);

@@ -8,6 +8,8 @@ Recommended hosted stack:
 - Encrypted media: private Cloudflare R2 bucket through the S3-compatible API.
 - HTTPS: Render custom domain TLS, or Caddy if self-hosting.
 
+Before deployment, run `npm run check` and `npm test`. The app requires Node `>=24.7` unless the deployment also provides a compatible Argon2 package fallback.
+
 ## Render + PostgreSQL + R2
 
 1. Push this project to a private GitHub repository.
@@ -19,6 +21,10 @@ Recommended hosted stack:
 ```text
 PUBLIC_ORIGIN=https://your-domain.example
 APP_SETUP_CODE=<long random setup code>
+CSP_REPORT_URI=/api/csp-report
+NODE_ENV=production
+STORE_DRIVER=postgres
+MEDIA_DRIVER=s3
 S3_BUCKET=<private bucket name>
 S3_ENDPOINT=https://<cloudflare-account-id>.r2.cloudflarestorage.com
 S3_ACCESS_KEY_ID=<r2 access key>
@@ -29,6 +35,8 @@ BACKUP_PASSPHRASE=<long random backup secret>
 6. Add your custom domain to Render.
 7. Point DNS to Render as instructed by Render.
 8. Open the site, enter `APP_SETUP_CODE`, create your account, then create one invite.
+
+Production must serve only HTTPS. Confirm response headers include HSTS, strict CSP, `HttpOnly`/`Secure` session cookies, and no unexpected external script/style origins. If SRI hashes are introduced later, regenerate them whenever `public/app.js` or `public/styles.css` changes.
 
 ## Self-Hosted HTTPS
 

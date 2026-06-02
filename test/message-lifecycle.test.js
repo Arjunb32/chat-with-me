@@ -44,6 +44,7 @@ test('stores sealed messages and runs delivery/read/delete lifecycle', async () 
       deliveredTo: [member.id]
     });
 
+    assert.equal(message.mode, 'private');
     assert.equal(Object.hasOwn(message, 'type'), false);
     assert.equal(message.payload.epoch, 2);
     assert.ok(message.deliveredBy[member.id]);
@@ -77,8 +78,59 @@ test('legacy messages keep encrypted payload compatibility without public type l
 
     const [message] = await store.listMessages({ limit: 10 });
     assert.equal(message.id, 'msg_legacy_text');
+    assert.equal(message.mode, 'private');
     assert.equal(Object.hasOwn(message, 'type'), false);
     assert.deepEqual(message.payload, envelope(1));
+  });
+});
+
+test('stores standard messages with plain payloads', async () => {
+  await withStore(async (store) => {
+    const owner = await store.createOwner({ displayName: 'Owner', passwordHash: 'hash' });
+    const message = await store.addMessage({
+      senderId: owner.id,
+      mode: 'standard',
+      payload: { kind: 'text', text: 'plain hello' }
+    });
+
+    assert.equal(message.mode, 'standard');
+    assert.deepEqual(message.payload, { kind: 'text', text: 'plain hello' });
+    assert.equal(store.db.messages[0].mode, 'standard');
+  });
+});
+
+test('lists contacts without current user', async () => {
+  await withStore(async (store) => {
+    const owner = await store.createOwner({ displayName: 'Owner', passwordHash: 'hash' });
+    const invite = await store.createInvite(owner.id);
+    const member = await store.signupWithInvite({
+      displayName: 'Member',
+      passwordHash: 'hash',
+      inviteCode: invite.token
+    });
+
+    const contacts = await store.listContacts({ excludeUserId: owner.id });
+    assert.equal(contacts.length, 1);
+    assert.equal(contacts[0].id, member.id);
+    assert.equal(contacts[0].username, 'member');
+    assert.equal(contacts[0].avatarColor, '#f35f4c');
+  });
+});
+
+test('updates public avatar color metadata', async () => {
+  await withStore(async (store) => {
+    const owner = await store.createOwner({ displayName: 'Owner', passwordHash: 'hash' });
+    const updated = await store.updateProfile({
+      userId: owner.id,
+      avatarColor: '#6d5dfc'
+    });
+
+    assert.equal(updated.avatarColor, '#6d5dfc');
+    assert.equal(store.db.users[0].avatarColor, '#6d5dfc');
+    await assert.rejects(
+      () => store.updateProfile({ userId: owner.id, avatarColor: 'purple' }),
+      /Avatar color/
+    );
   });
 });
 

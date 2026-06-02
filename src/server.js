@@ -25,6 +25,7 @@ const {
   cleanInviteCode,
   cleanRecoveryCode,
   hashPassword,
+  normalizeAvatarColor,
   normalizeDisplayName,
   passwordNeedsRehash,
   randomToken,
@@ -331,6 +332,14 @@ function emitPresence() {
   });
 }
 
+async function buildContacts(userId) {
+  const contacts = await store.listContacts({ excludeUserId: userId });
+  return contacts.map((contact) => ({
+    ...contact,
+    online: onlineUsers.has(contact.id)
+  }));
+}
+
 async function deleteAttachmentFiles(attachments) {
   for (const attachment of attachments) {
     await mediaStorage.remove(attachment.filename);
@@ -357,7 +366,12 @@ app.post(
   express.raw({ type: '*/*', limit: `${MAX_UPLOAD_MB}mb` }),
   async (req, res, next) => {
     try {
-      validateAttachmentEnvelope(req.body, MAX_UPLOAD_BYTES, MAX_UPLOAD_MB);
+      const mode = req.get('x-chat-mode') === 'standard' ? 'standard' : 'private';
+      if (mode === 'private') {
+        validateAttachmentEnvelope(req.body, MAX_UPLOAD_BYTES, MAX_UPLOAD_MB);
+      } else if (!Buffer.isBuffer(req.body) || req.body.length < 1 || req.body.length > MAX_UPLOAD_BYTES) {
+        throw new Error(`File must be between 1 byte and ${MAX_UPLOAD_MB} MB.`);
+      }
 
       const id = `att_${randomToken(12)}`;
       const filename = mediaStorage.keyForAttachment(id);
@@ -366,6 +380,7 @@ app.post(
       const attachment = await store.addAttachment({
         id,
         ownerId: req.user.id,
+        kind: mode === 'private' ? 'encrypted' : 'photo',
         byteLength: req.body.length,
         filename
       });
@@ -388,7 +403,7 @@ app.get('/api/attachments/:id/blob', requireAuth, async (req, res, next) => {
     }
 
     const body = await mediaStorage.get(attachment.filename);
-    res.type('application/json');
+    res.type(attachment.kind === 'encrypted' ? 'application/json' : 'application/octet-stream');
     return res.send(body);
   } catch (error) {
     return next(error);
@@ -561,6 +576,19 @@ app.get('/api/account/security', requireAuth, async (req, res, next) => {
   }
 });
 
+app.patch('/api/account/profile', requireAuth, async (req, res, next) => {
+  try {
+    const user = await store.updateProfile({
+      userId: req.user.id,
+      avatarColor: normalizeAvatarColor(req.body.avatarColor)
+    });
+    await audit(req, 'profile.updated', { actorId: req.user.id, metadata: { field: 'avatarColor' } });
+    res.json(await buildMePayload(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete('/api/account/sessions/:id', requireAuth, async (req, res, next) => {
   try {
     const revoked = await store.deleteSessionById({
@@ -661,6 +689,14 @@ app.get('/api/messages', requireAuth, async (req, res, next) => {
   }
 });
 
+app.get('/api/contacts', requireAuth, async (req, res, next) => {
+  try {
+    res.json({ contacts: await buildContacts(req.user.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 io.use(async (socket, next) => {
   try {
     const cookies = cookie.parse(socket.handshake.headers.cookie || '');
@@ -706,6 +742,7 @@ io.on('connection', async (socket) => {
 
       const message = await store.addMessage({
         senderId: user.id,
+        mode: messageInput.mode,
         payload: messageInput.payload,
         attachmentId: messageInput.attachmentId,
         expiresAt: messageInput.expiresAt,
