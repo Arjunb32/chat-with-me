@@ -12,7 +12,28 @@
   --mine: #fff1ef;
   --theirs: #eef6f4;
   --shadow: 0 16px 40px rgba(25, 31, 38, 0.12);
+  --motion-fast: 80ms;
+  --motion-toggle: 150ms;
+  --motion-dialog: 180ms;
+  --motion-message: 200ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101418;
+  --panel: #191f24;
+  --panel-soft: #222b31;
+  --ink: #edf2f4;
+  --muted: #aab5bd;
+  --line: #344149;
+  --accent: #ff765f;
+  --accent-strong: #ff9a88;
+  --teal: #39b7a8;
+  --mine: #3a2523;
+  --theirs: #1f3230;
+  --shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
 }
 
 * {
@@ -52,6 +73,10 @@ button:hover {
   background: var(--accent-strong);
 }
 
+button:active {
+  transform: scale(0.98);
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -59,7 +84,7 @@ button:disabled {
 
 button.ghost {
   border: 1px solid var(--line);
-  background: #ffffff;
+  background: var(--panel);
   color: var(--ink);
 }
 
@@ -74,7 +99,7 @@ select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--panel);
   color: var(--ink);
   outline: 0;
 }
@@ -214,6 +239,10 @@ label {
   padding: 14px clamp(14px, 3vw, 28px);
 }
 
+:root[data-theme="dark"] .chat-header {
+  background: rgba(25, 31, 36, 0.94);
+}
+
 .chat-title h1,
 .chat-title p {
   margin: 0;
@@ -233,6 +262,32 @@ label {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.mode-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 118px;
+  background: var(--panel-soft);
+  color: var(--ink);
+}
+
+.mode-toggle.private {
+  background: #142622;
+  color: #ffffff;
+}
+
+.mode-knob {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--teal);
+}
+
+.mode-toggle.private .mode-knob {
+  background: var(--accent);
 }
 
 .messages-shell {
@@ -262,6 +317,22 @@ label {
   margin: 0 auto;
 }
 
+.messages-empty {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  padding: 28px 16px;
+  text-align: center;
+}
+
+.messages-empty strong {
+  color: var(--ink);
+}
+
 .message-row {
   display: flex;
 }
@@ -289,6 +360,18 @@ label {
   font-style: italic;
 }
 
+.private-message::before {
+  content: "";
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-radius: 2px;
+  vertical-align: 0;
+  opacity: 0.55;
+}
+
 .message-text {
   margin: 0;
   white-space: pre-wrap;
@@ -303,6 +386,20 @@ label {
   color: var(--muted);
   font-size: 0.72rem;
   margin-top: 6px;
+}
+
+.lock-mark {
+  font-size: 0;
+}
+
+.lock-mark::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 2px solid currentColor;
+  border-radius: 2px;
+  opacity: 0.65;
 }
 
 .delete-message {
@@ -331,7 +428,7 @@ label {
   max-height: 420px;
   object-fit: contain;
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--panel);
   cursor: zoom-in;
 }
 
@@ -357,13 +454,77 @@ label {
   font-size: 0.9rem;
 }
 
+.preview-panel {
+  width: min(940px, calc(100% - 20px));
+  margin: 0 auto 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px;
+}
+
+.recording-panel {
+  grid-template-columns: minmax(0, 260px) auto;
+  justify-content: start;
+}
+
+.preview-media img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+.preview-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.preview-copy strong,
+.preview-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-copy span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.preview-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.preview-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--panel-soft);
+}
+
+.preview-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--teal);
+}
+
 .composer {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) 88px auto;
   gap: 8px;
   align-items: end;
   border-top: 1px solid var(--line);
-  background: #ffffff;
+  background: var(--panel);
   padding: 10px clamp(10px, 3vw, 28px);
 }
 
@@ -380,6 +541,128 @@ label {
 #recordButton.recording {
   background: var(--accent);
   color: #ffffff;
+}
+
+.contacts-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  justify-items: end;
+  background: rgba(20, 24, 28, 0.34);
+}
+
+.contacts-sheet {
+  width: min(380px, 100%);
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 12px;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+
+.contacts-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.contacts-head h2 {
+  margin: 0;
+}
+
+.contacts-list {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.contact-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.contact-avatar {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--avatar-color, var(--teal));
+  color: #ffffff;
+  font-weight: 800;
+}
+
+.profile-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px;
+}
+
+.profile-avatar {
+  flex: 0 0 auto;
+}
+
+.avatar-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.avatar-swatch {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: var(--swatch-color);
+  padding: 0;
+}
+
+.avatar-swatch[aria-pressed="true"] {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--swatch-color);
+}
+
+.contact-copy {
+  min-width: 0;
+}
+
+.contact-copy strong,
+.contact-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-copy span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.contact-card.online .contact-copy span::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #21a67a;
+  margin-right: 6px;
 }
 
 .modal {
@@ -460,7 +743,7 @@ label {
 .security-empty {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--panel);
   padding: 10px;
 }
 
@@ -533,6 +816,48 @@ label {
   color: #111418;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  button,
+  .mode-toggle,
+  .mode-knob {
+    transition: background-color var(--motion-toggle) var(--ease-out), color var(--motion-toggle) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+  }
+
+  .message-new {
+    animation: message-in var(--motion-message) var(--ease-out);
+  }
+
+  .modal[open],
+  .viewer[open],
+  .contacts-panel:not([hidden]) .contacts-sheet {
+    animation: modal-in var(--motion-dialog) var(--ease-out);
+    will-change: transform, opacity;
+  }
+
+  #recordButton.recording {
+    animation: record-pulse 900ms var(--ease-out) infinite;
+  }
+
+  .preview-progress span {
+    transition: width var(--motion-message) var(--ease-out);
+  }
+
+  @keyframes message-in {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes modal-in {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes record-pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.12); }
+  }
+}
+
 @media (max-width: 760px) {
   .auth-grid {
     grid-template-columns: 1fr;
@@ -558,6 +883,16 @@ label {
 
   .composer {
     grid-template-columns: auto auto 1fr auto;
+  }
+
+  .preview-panel,
+  .contact-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .preview-actions,
+  .contact-card button {
+    grid-column: 1 / -1;
   }
 
   #messageInput {

@@ -12,15 +12,23 @@
     cryptoRootKey: null,
     cryptoKeyCache: new Map(),
     keyFingerprint: '',
+    mode: sessionStorage.getItem('chatMode') === 'private' ? 'private' : 'standard',
+    contacts: [],
+    activeContactId: null,
     sessionEpoch: 1,
     socket: null,
     messages: [],
     decryptedMessages: new Map(),
     attachmentCache: new Map(),
     recording: null,
+    recordingTimer: null,
+    preview: null,
+    pendingUploads: new Map(),
+    newlyRenderedIds: new Set(),
     typingTimer: null,
     peerTypingTimer: null,
-    olderExhausted: false
+    olderExhausted: false,
+    theme: localStorage.getItem('chatTheme') === 'dark' ? 'dark' : 'light'
   };
 
   const els = {
@@ -38,8 +46,12 @@
     logoutFromUnlock: document.querySelector('#logoutFromUnlock'),
     presenceText: document.querySelector('#presenceText'),
     inviteButton: document.querySelector('#inviteButton'),
+    modeToggle: document.querySelector('#modeToggle'),
+    modeLabel: document.querySelector('#modeLabel'),
+    contactsButton: document.querySelector('#contactsButton'),
     codesButton: document.querySelector('#codesButton'),
     keyButton: document.querySelector('#keyButton'),
+    themeButton: document.querySelector('#themeButton'),
     accountButton: document.querySelector('#accountButton'),
     lockButton: document.querySelector('#lockButton'),
     logoutButton: document.querySelector('#logoutButton'),
@@ -47,6 +59,10 @@
     messageList: document.querySelector('#messageList'),
     typingLine: document.querySelector('#typingLine'),
     uploadLine: document.querySelector('#uploadLine'),
+    recordingPanel: document.querySelector('#recordingPanel'),
+    recordingCanvas: document.querySelector('#recordingCanvas'),
+    recordingTimer: document.querySelector('#recordingTimer'),
+    previewPanel: document.querySelector('#previewPanel'),
     composerForm: document.querySelector('#composerForm'),
     photoButton: document.querySelector('#photoButton'),
     photoInput: document.querySelector('#photoInput'),
@@ -64,12 +80,16 @@
     keyFingerprintOutput: document.querySelector('#keyFingerprintOutput'),
     keyEpochText: document.querySelector('#keyEpochText'),
     accountDialog: document.querySelector('#accountDialog'),
+    profilePanel: document.querySelector('#profilePanel'),
     sessionsList: document.querySelector('#sessionsList'),
     devicesList: document.querySelector('#devicesList'),
     auditSection: document.querySelector('#auditSection'),
     auditList: document.querySelector('#auditList'),
     viewerDialog: document.querySelector('#viewerDialog'),
-    viewerImage: document.querySelector('#viewerImage')
+    viewerImage: document.querySelector('#viewerImage'),
+    contactsPanel: document.querySelector('#contactsPanel'),
+    contactsCloseButton: document.querySelector('#contactsCloseButton'),
+    contactsList: document.querySelector('#contactsList')
   };
 
   function setView(viewName) {
@@ -83,9 +103,58 @@
     els.authNotice.hidden = !message;
   }
 
+  function applyTheme(theme) {
+    state.theme = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = state.theme;
+    localStorage.setItem('chatTheme', state.theme);
+    const dark = state.theme === 'dark';
+    if (els.themeButton) {
+      els.themeButton.textContent = dark ? 'Light' : 'Dark';
+      els.themeButton.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+    }
+    const themeMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeMeta) themeMeta.content = dark ? '#101418' : '#f35f4c';
+  }
+
+  function toggleTheme() {
+    applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+  }
+
   function setUploadLine(message) {
     els.uploadLine.textContent = message || '';
     els.uploadLine.hidden = !message;
+  }
+
+  function isPrivateMode() {
+    return state.mode === 'private';
+  }
+
+  function setMode(mode, options = {}) {
+    state.mode = mode === 'private' ? 'private' : 'standard';
+    sessionStorage.setItem('chatMode', state.mode);
+    updateModeUi();
+    if (options.enter !== false && state.me) {
+      if (isPrivateMode() && !state.cryptoRootKey) {
+        setView('unlock');
+      } else {
+        enterChat().catch((error) => setUploadLine(error.message));
+      }
+    }
+  }
+
+  function updateModeUi() {
+    if (!els.modeToggle) return;
+    const privateMode = isPrivateMode();
+    els.modeToggle.classList.toggle('private', privateMode);
+    els.modeToggle.setAttribute('aria-pressed', String(privateMode));
+    els.modeToggle.setAttribute('aria-label', privateMode ? 'Switch to Standard Mode' : 'Switch to Private Mode');
+    els.modeLabel.textContent = privateMode ? 'Private' : 'Standard';
+    if (els.keyButton) els.keyButton.hidden = !privateMode;
+    if (els.lockButton) els.lockButton.hidden = !privateMode;
+    if (els.unlockName) {
+      const label = document.querySelector('#unlockView .wordmark strong');
+      if (label) label.textContent = 'Private Mode';
+    }
   }
 
   function formValues(form) {
@@ -301,7 +370,12 @@
     setSessionEpoch(state.setup.sessionEpoch);
     els.unlockName.textContent = state.me.displayName;
     showAuthNotice('');
-    setView('unlock');
+    updateModeUi();
+    if (isPrivateMode()) {
+      setView('unlock');
+    } else {
+      enterChat().catch((error) => setUploadLine(error.message));
+    }
     if (Array.isArray(payload.recoveryCodes) && payload.recoveryCodes.length) {
       showRecoveryCodes(payload.recoveryCodes);
     }
@@ -401,14 +475,20 @@
       state.keyFingerprint = secret.fingerprint;
       els.unlockForm.reset();
       updateKeyUi();
-      setView('chat');
-      connectSocket();
-      await loadMessages({ stickToBottom: true });
+      await enterChat();
     } catch (error) {
       showAuthNotice(error.message);
     } finally {
       setFormBusy(els.unlockForm, false);
     }
+  }
+
+  async function enterChat() {
+    setView('chat');
+    updateModeUi();
+    connectSocket();
+    await loadMessages({ stickToBottom: true });
+    await loadContacts();
   }
 
   function connectSocket() {
@@ -431,6 +511,7 @@
     state.socket.on('presence:update', (payload) => {
       state.onlineUserIds = payload.onlineUserIds || [];
       renderPresence();
+      renderContacts();
     });
 
     state.socket.on('crypto:epoch', (payload) => {
@@ -440,6 +521,7 @@
     });
 
     state.socket.on('message:new', async (message) => {
+      state.newlyRenderedIds.add(message.id);
       mergeMessages([message]);
       await renderMessages({ stickToBottom: true });
     });
@@ -477,7 +559,9 @@
   }
 
   function renderPresence() {
-    const peer = state.people.find((person) => person.id !== state.me.id);
+    const peer = state.activeContactId
+      ? state.people.find((person) => person.id === state.activeContactId) || state.contacts.find((person) => person.id === state.activeContactId)
+      : state.people.find((person) => person.id !== state.me.id);
     if (!peer) {
       els.presenceText.textContent = 'Waiting for invite';
       return;
@@ -493,7 +577,7 @@
 
     for (const message of messages) {
       const previous = map.get(message.id) || {};
-      if (message.payload && message.payload.epoch) {
+      if ((message.mode || 'private') === 'private' && message.payload && message.payload.epoch) {
         setSessionEpoch(message.payload.epoch);
       }
       map.set(message.id, { ...previous, ...message });
@@ -530,8 +614,18 @@
     const shouldStick = options.stickToBottom || isNearBottom();
     els.messageList.replaceChildren();
 
-    for (const message of state.messages) {
-      els.messageList.append(await buildMessageNode(message));
+    if (!state.messages.length) {
+      const empty = document.createElement('div');
+      empty.className = 'messages-empty';
+      empty.innerHTML = '<strong>No messages yet</strong><span></span>';
+      empty.querySelector('span').textContent = isPrivateMode()
+        ? 'Unlock private mode and send the first encrypted message.'
+        : 'Send the first standard message.';
+      els.messageList.append(empty);
+    } else {
+      for (const message of state.messages) {
+        els.messageList.append(await buildMessageNode(message));
+      }
     }
 
     els.loadOlderButton.hidden = state.messages.length === 0 || state.olderExhausted;
@@ -556,6 +650,13 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
+    if ((message.mode || 'private') === 'private') {
+      bubble.classList.add('private-message');
+    }
+    if (state.newlyRenderedIds.has(message.id)) {
+      row.classList.add('message-new');
+      state.newlyRenderedIds.delete(message.id);
+    }
     row.append(bubble);
 
     if (message.deletedAt) {
@@ -610,6 +711,14 @@
   }
 
   async function getDecryptedMessage(message) {
+    if ((message.mode || 'private') === 'standard') {
+      return { ok: true, data: message.payload || {} };
+    }
+
+    if (!state.cryptoRootKey) {
+      return { ok: false, data: null };
+    }
+
     if (state.decryptedMessages.has(message.id)) {
       return state.decryptedMessages.get(message.id);
     }
@@ -677,8 +786,9 @@
       throw new Error('Attachment unavailable.');
     }
 
-    const envelope = await response.json();
-    const bytes = await decryptBytes(envelope);
+    const bytes = (message.mode || 'private') === 'private'
+      ? await decryptBytes(await response.json())
+      : new Uint8Array(await response.arrayBuffer());
     const blob = new Blob([bytes], {
       type: data.mime || (kind === 'photo' ? 'image/jpeg' : 'audio/webm')
     });
@@ -693,6 +803,14 @@
   function buildMessageMeta(message) {
     const meta = document.createElement('div');
     meta.className = 'message-meta';
+
+    if ((message.mode || 'private') === 'private') {
+      const lock = document.createElement('span');
+      lock.className = 'lock-mark';
+      lock.textContent = 'Lock';
+      lock.setAttribute('aria-label', 'Private encrypted message');
+      meta.append(lock);
+    }
 
     const time = document.createElement('span');
     time.textContent = formatTime(message.createdAt);
@@ -786,8 +904,9 @@
     setUploadLine('');
 
     try {
-      const payload = await encryptJson({ kind: 'text', text });
+      const payload = isPrivateMode() ? await encryptJson({ kind: 'text', text }) : { kind: 'text', text };
       await emitMessage({
+        mode: state.mode,
         payload,
         expiresInMs: Number(els.expirySelect.value || 0),
         clientId: window.crypto.randomUUID()
@@ -803,7 +922,7 @@
   }
 
   async function sendMedia(kind, blob, meta) {
-    if (!state.cryptoRootKey) {
+    if (isPrivateMode() && !state.cryptoRootKey) {
       throw new Error('Unlock the chat first.');
     }
 
@@ -812,33 +931,27 @@
       throw new Error('Media is too large.');
     }
 
-    setUploadLine(`Encrypting ${kind}`);
-    const encryptedAttachment = await encryptBytes(new Uint8Array(await blob.arrayBuffer()));
-    const rawBody = encoder.encode(JSON.stringify(encryptedAttachment));
+    setUploadLine(isPrivateMode() ? `Encrypting ${kind}` : `Preparing ${kind}`);
+    const bodyBytes = isPrivateMode()
+      ? encoder.encode(JSON.stringify(await encryptBytes(new Uint8Array(await blob.arrayBuffer()))))
+      : new Uint8Array(await blob.arrayBuffer());
 
     setUploadLine(`Uploading ${kind}`);
-    const response = await fetch('/api/attachments', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: rawBody
+    const uploadPayload = await uploadAttachment(bodyBytes, {
+      contentType: isPrivateMode() ? 'application/json' : (blob.type || 'application/octet-stream'),
+      onProgress: updatePreviewProgress
     });
 
-    const uploadPayload = await response.json();
-    if (!response.ok) {
-      throw new Error(uploadPayload.error || 'Upload failed.');
-    }
-
-    const payload = await encryptJson({
+    const plainPayload = {
       ...meta,
       kind,
       attachmentId: uploadPayload.attachmentId
-    });
+    };
+    const payload = isPrivateMode() ? await encryptJson(plainPayload) : plainPayload;
 
     setUploadLine(`Sending ${kind}`);
     await emitMessage({
+      mode: state.mode,
       payload,
       attachmentId: uploadPayload.attachmentId,
       expiresInMs: Number(els.expirySelect.value || 0),
@@ -848,18 +961,156 @@
     setUploadLine('');
   }
 
+  async function loadContacts() {
+    const payload = await api('/api/contacts');
+    state.contacts = payload.contacts || [];
+    renderContacts();
+  }
+
+  function renderContacts() {
+    if (!els.contactsList) return;
+    els.contactsList.replaceChildren();
+    const contacts = state.contacts.map((contact) => ({
+      ...contact,
+      online: state.onlineUserIds.includes(contact.id) || contact.online
+    }));
+    if (!contacts.length) {
+      const empty = document.createElement('p');
+      empty.className = 'contacts-empty';
+      empty.textContent = 'No contacts yet';
+      els.contactsList.append(empty);
+      return;
+    }
+    for (const contact of contacts) {
+      const card = document.createElement('article');
+      card.className = 'contact-card';
+      const initials = (contact.displayName || contact.username || '?').slice(0, 2).toUpperCase();
+      card.innerHTML = '<div class="contact-avatar" aria-hidden="true"></div><div class="contact-copy"><strong></strong><span></span></div>';
+      const avatar = card.querySelector('.contact-avatar');
+      avatar.textContent = initials;
+      avatar.style.setProperty('--avatar-color', contact.avatarColor || '#147c72');
+      card.querySelector('strong').textContent = contact.displayName || contact.username;
+      card.querySelector('span').textContent = contact.online ? 'Online' : `Last seen ${formatShortDate(contact.lastSeenAt)}`;
+      card.classList.toggle('online', Boolean(contact.online));
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'Start Chat';
+      button.setAttribute('aria-label', `Start chat with ${contact.displayName || contact.username}`);
+      button.addEventListener('click', () => {
+        state.activeContactId = contact.id;
+        closeContacts();
+        renderPresence();
+        els.messageInput.focus();
+      });
+      card.append(button);
+      els.contactsList.append(card);
+    }
+  }
+
+  function openContacts() {
+    loadContacts().catch((error) => setUploadLine(error.message));
+    els.contactsPanel.hidden = false;
+  }
+
+  function closeContacts() {
+    els.contactsPanel.hidden = true;
+  }
+
+  function renderProfilePanel() {
+    if (!els.profilePanel || !state.me) return;
+    const colors = ['#147c72', '#f35f4c', '#6d5dfc', '#b7791f'];
+    const current = state.me.avatarColor || '#147c72';
+    els.profilePanel.replaceChildren();
+
+    const avatar = document.createElement('div');
+    avatar.className = 'profile-avatar contact-avatar';
+    avatar.textContent = (state.me.displayName || '?').slice(0, 2).toUpperCase();
+    avatar.style.setProperty('--avatar-color', current);
+
+    const swatches = document.createElement('div');
+    swatches.className = 'avatar-swatches';
+    for (const color of colors) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'avatar-swatch';
+      button.style.setProperty('--swatch-color', color);
+      button.setAttribute('aria-label', `Use avatar color ${color}`);
+      button.setAttribute('aria-pressed', String(color === current));
+      button.addEventListener('click', () => {
+        updateProfileColor(color).catch((error) => setUploadLine(error.message));
+      });
+      swatches.append(button);
+    }
+
+    els.profilePanel.append(avatar, swatches);
+  }
+
+  async function updateProfileColor(avatarColor) {
+    const payload = await api('/api/account/profile', {
+      method: 'PATCH',
+      body: { avatarColor }
+    });
+    state.me = payload.me;
+    state.people = payload.people || state.people;
+    renderProfilePanel();
+    await loadContacts();
+  }
+
+  function uploadAttachment(body, { contentType, onProgress } = {}) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/attachments');
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('Content-Type', contentType || 'application/octet-stream');
+      xhr.setRequestHeader('X-Chat-Mode', state.mode);
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable && typeof onProgress === 'function') {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      });
+      xhr.addEventListener('load', () => {
+        let payload = {};
+        try {
+          payload = JSON.parse(xhr.responseText || '{}');
+        } catch {}
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(payload);
+        } else {
+          reject(new Error(payload.error || 'Upload failed.'));
+        }
+      });
+      xhr.addEventListener('error', () => reject(new Error('Upload failed.')));
+      xhr.send(body);
+    });
+  }
+
+  function updatePreviewProgress(value) {
+    const bar = els.previewPanel.querySelector('.preview-progress span');
+    if (bar) bar.style.width = `${Math.max(0, Math.min(100, value))}%`;
+  }
+
   async function handlePhotoFile(file) {
     if (!file || !file.type.startsWith('image/')) {
       throw new Error('Choose an image file.');
     }
 
-    setUploadLine('Preparing photo');
     const prepared = await compressImage(file);
-    await sendMedia('photo', prepared.blob, {
+    showPhotoPreview(file, prepared.blob);
+  }
+
+  function showPhotoPreview(file, blob) {
+    const url = URL.createObjectURL(blob);
+    showPreview('photo', {
+      blob,
+      meta: {
       name: file.name,
-      mime: prepared.blob.type || 'image/jpeg',
-      size: prepared.blob.size,
+        mime: blob.type || 'image/jpeg',
+        size: blob.size,
       originalSize: file.size
+      },
+      url,
+      title: file.name,
+      detail: formatBytes(blob.size)
     });
   }
 
@@ -920,6 +1171,7 @@
 
     recorder.addEventListener('stop', async () => {
       state.recording = null;
+      stopRecordingVisualizer(recording);
       els.recordButton.classList.remove('recording');
       els.recordButton.querySelector('span').textContent = 'Voice';
       stream.getTracks().forEach((track) => track.stop());
@@ -927,10 +1179,11 @@
       if (!recording.chunks.length) return;
 
       try {
+        const durationMs = Date.now() - recording.startedAt;
         const blob = new Blob(recording.chunks, { type: recording.mimeType });
-        await sendMedia('voice', blob, {
+        showVoicePreview(blob, {
           mime: recording.mimeType,
-          durationMs: Date.now() - recording.startedAt,
+          durationMs,
           size: blob.size
         });
       } catch (error) {
@@ -940,14 +1193,149 @@
 
     state.recording = recording;
     recorder.start();
+    startRecordingVisualizer(recording);
     els.recordButton.classList.add('recording');
     els.recordButton.querySelector('span').textContent = 'Stop';
+  }
+
+  function showVoicePreview(blob, meta) {
+    const url = URL.createObjectURL(blob);
+    showPreview('voice', {
+      blob,
+      meta,
+      url,
+      title: 'Voice message',
+      detail: formatDuration(meta.durationMs)
+    });
+    drawStaticWaveform(blob, els.previewPanel.querySelector('canvas')).catch(() => {});
+  }
+
+  function showPreview(kind, preview) {
+    clearPreview();
+    state.preview = { kind, ...preview };
+    const media = kind === 'photo'
+      ? `<img src="${preview.url}" alt="Photo preview">`
+      : '<canvas width="260" height="48" aria-label="Voice waveform"></canvas><audio controls preload="metadata"></audio>';
+    els.previewPanel.innerHTML = `
+      <div class="preview-media">${media}</div>
+      <div class="preview-copy"><strong></strong><span></span><div class="preview-progress" hidden><span></span></div></div>
+      <div class="preview-actions">
+        <button type="button" data-preview-send aria-label="Send preview">Send</button>
+        <button type="button" class="ghost" data-preview-discard aria-label="Discard preview">Discard</button>
+      </div>`;
+    els.previewPanel.querySelector('strong').textContent = preview.title;
+    els.previewPanel.querySelector('span').textContent = preview.detail;
+    const audio = els.previewPanel.querySelector('audio');
+    if (audio) audio.src = preview.url;
+    els.previewPanel.hidden = false;
+  }
+
+  function clearPreview() {
+    if (state.preview && state.preview.url) URL.revokeObjectURL(state.preview.url);
+    state.preview = null;
+    els.previewPanel.hidden = true;
+    els.previewPanel.replaceChildren();
+  }
+
+  async function sendPreview() {
+    if (!state.preview) return;
+    const preview = state.preview;
+    const progress = els.previewPanel.querySelector('.preview-progress');
+    if (progress) progress.hidden = false;
+    try {
+      await sendMedia(preview.kind, preview.blob, preview.meta);
+      clearPreview();
+    } catch (error) {
+      setUploadLine(error.message);
+      const actions = els.previewPanel.querySelector('.preview-actions');
+      if (actions && !actions.querySelector('[data-preview-retry]')) {
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.dataset.previewRetry = 'true';
+        retry.textContent = 'Retry';
+        retry.setAttribute('aria-label', 'Retry upload');
+        actions.prepend(retry);
+      }
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function formatDuration(ms) {
+    const total = Math.max(0, Math.round(ms / 1000));
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
   }
 
   function stopRecording() {
     if (state.recording && state.recording.recorder.state !== 'inactive') {
       state.recording.recorder.stop();
     }
+  }
+
+  function startRecordingVisualizer(recording) {
+    els.recordingPanel.hidden = false;
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const audioContext = new AudioContext();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 128;
+    const source = audioContext.createMediaStreamSource(recording.stream);
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const ctx = els.recordingCanvas.getContext('2d');
+    recording.audioContext = audioContext;
+    recording.visualFrame = requestAnimationFrame(function draw() {
+      analyser.getByteFrequencyData(data);
+      drawBars(ctx, els.recordingCanvas, data);
+      recording.visualFrame = requestAnimationFrame(draw);
+    });
+    state.recordingTimer = setInterval(() => {
+      els.recordingTimer.textContent = formatDuration(Date.now() - recording.startedAt);
+    }, 250);
+  }
+
+  function stopRecordingVisualizer(recording) {
+    els.recordingPanel.hidden = true;
+    if (recording.visualFrame) cancelAnimationFrame(recording.visualFrame);
+    if (recording.audioContext) recording.audioContext.close().catch(() => {});
+    clearInterval(state.recordingTimer);
+    state.recordingTimer = null;
+    els.recordingTimer.textContent = '00:00';
+  }
+
+  function drawBars(ctx, canvas, values) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#147c72';
+    const step = Math.max(1, Math.floor(values.length / 32));
+    const barWidth = canvas.width / 32 - 2;
+    for (let index = 0; index < 32; index += 1) {
+      const value = values[index * step] / 255;
+      const height = Math.max(4, value * canvas.height);
+      ctx.fillRect(index * (barWidth + 2), (canvas.height - height) / 2, barWidth, height);
+    }
+  }
+
+  async function drawStaticWaveform(blob, canvas) {
+    if (!canvas) return;
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const audioContext = new AudioContext();
+    const buffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+    const samples = buffer.getChannelData(0);
+    const values = new Uint8Array(64);
+    const block = Math.max(1, Math.floor(samples.length / values.length));
+    for (let index = 0; index < values.length; index += 1) {
+      let peak = 0;
+      for (let offset = 0; offset < block; offset += 1) {
+        peak = Math.max(peak, Math.abs(samples[index * block + offset] || 0));
+      }
+      values[index] = Math.min(255, Math.round(peak * 255));
+    }
+    drawBars(canvas.getContext('2d'), canvas, values);
+    await audioContext.close();
   }
 
   function emitTyping(isTyping) {
@@ -1112,6 +1500,7 @@
     setUploadLine('');
     try {
       const payload = await api('/api/account/security');
+      renderProfilePanel();
       renderSecurityList(els.sessionsList, payload.sessions || [], 'session');
       renderSecurityList(els.devicesList, payload.devices || [], 'device');
       els.auditSection.hidden = !payload.canViewAudit;
@@ -1142,10 +1531,12 @@
   }
 
   async function init() {
+    applyTheme(state.theme);
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
     }
 
+    updateModeUi();
     await refreshSetup();
 
     try {
@@ -1163,9 +1554,13 @@
   els.logoutFromUnlock.addEventListener('click', logout);
   els.logoutButton.addEventListener('click', logout);
   els.lockButton.addEventListener('click', lockChat);
+  els.modeToggle.addEventListener('click', () => setMode(isPrivateMode() ? 'standard' : 'private'));
+  els.contactsButton.addEventListener('click', openContacts);
+  els.contactsCloseButton.addEventListener('click', closeContacts);
   els.inviteButton.addEventListener('click', createInvite);
   els.codesButton.addEventListener('click', rotateRecoveryCodes);
   els.keyButton.addEventListener('click', openKeyDialog);
+  els.themeButton.addEventListener('click', toggleTheme);
   els.accountButton.addEventListener('click', openAccountDialog);
   els.loadOlderButton.addEventListener('click', async () => {
     const first = state.messages[0];
@@ -1196,6 +1591,20 @@
     } catch (error) {
       setUploadLine(error.message);
     }
+  });
+
+  els.previewPanel.addEventListener('click', (event) => {
+    if (event.target.closest('[data-preview-send], [data-preview-retry]')) {
+      sendPreview();
+    } else if (event.target.closest('[data-preview-discard]')) {
+      clearPreview();
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (state.preview) clearPreview();
+    if (!els.contactsPanel.hidden) closeContacts();
   });
 
   els.messageInput.addEventListener('input', () => {

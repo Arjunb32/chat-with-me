@@ -3,6 +3,7 @@ const {
   cleanInviteCode,
   futureDate,
   isExpired,
+  normalizeAvatarColor,
   normalizeDisplayName,
   randomSalt,
   randomToken,
@@ -35,6 +36,7 @@ function rowToUser(row) {
     id: row.id,
     displayName: row.display_name,
     displayNameKey: row.display_name_key,
+    avatarColor: row.avatar_color || '#147c72',
     passwordHash: row.password_hash,
     role: row.role,
     createdAt: iso(row.created_at)
@@ -73,6 +75,7 @@ function rowToMessage(row) {
   return {
     id: row.id,
     senderId: row.sender_id,
+    mode: row.mode || 'private',
     type: row.type,
     payload: row.payload,
     attachmentId: row.attachment_id,
@@ -111,6 +114,7 @@ class PostgresStore {
         id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
         display_name_key TEXT NOT NULL UNIQUE,
+        avatar_color TEXT NOT NULL DEFAULT '#147c72',
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK (role IN ('owner', 'member')),
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -170,6 +174,7 @@ class PostgresStore {
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         sender_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL DEFAULT 'private' CHECK (mode IN ('standard', 'private')),
         type TEXT NOT NULL CHECK (type IN ('sealed', 'text', 'photo', 'voice')),
         payload JSONB,
         attachment_id TEXT REFERENCES attachments(id) ON DELETE SET NULL,
@@ -202,6 +207,10 @@ class PostgresStore {
       ALTER TABLE attachments ADD CONSTRAINT attachments_kind_check CHECK (kind IN ('encrypted', 'photo', 'voice'));
       ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_type_check;
       ALTER TABLE messages ADD CONSTRAINT messages_type_check CHECK (type IN ('sealed', 'text', 'photo', 'voice'));
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'private';
+      ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_mode_check;
+      ALTER TABLE messages ADD CONSTRAINT messages_mode_check CHECK (mode IN ('standard', 'private'));
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '#147c72';
     `);
 
     await this.pool.query(
@@ -265,6 +274,33 @@ class PostgresStore {
   async listPublicUsers() {
     const { rows } = await this.pool.query('SELECT * FROM users ORDER BY created_at ASC');
     return rows.map((row) => toPublicUser(rowToUser(row)));
+  }
+
+  async listContacts({ excludeUserId } = {}) {
+    const { rows } = await this.pool.query(
+      `
+        SELECT
+          users.id,
+          users.display_name,
+          users.display_name_key,
+          users.avatar_color,
+          users.created_at,
+          MAX(sessions.last_seen_at) AS last_seen_at
+        FROM users
+        LEFT JOIN sessions ON sessions.user_id = users.id AND sessions.expires_at > now()
+        WHERE users.id <> $1
+        GROUP BY users.id
+        ORDER BY users.display_name ASC
+      `,
+      [excludeUserId]
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      username: row.display_name_key || row.display_name,
+      displayName: row.display_name,
+      avatarColor: row.avatar_color || '#147c72',
+      lastSeenAt: iso(row.last_seen_at || row.created_at)
+    }));
   }
 
   async advanceCryptoEpoch() {
@@ -354,17 +390,18 @@ class PostgresStore {
         id: `usr_${randomToken(12)}`,
         displayName: normalized,
         displayNameKey: normalized.toLocaleLowerCase(),
+        avatarColor: '#147c72',
         passwordHash,
         role: 'owner'
       };
 
       const { rows } = await client.query(
         `
-          INSERT INTO users (id, display_name, display_name_key, password_hash, role)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO users (id, display_name, display_name_key, avatar_color, password_hash, role)
+          VALUES ($1, $2, $3, $4, $5, $6)
           RETURNING *
         `,
-        [user.id, user.displayName, user.displayNameKey, user.passwordHash, user.role]
+        [user.id, user.displayName, user.displayNameKey, user.avatarColor, user.passwordHash, user.role]
       );
 
       return toPublicUser(rowToUser(rows[0]));
@@ -403,17 +440,18 @@ class PostgresStore {
         id: `usr_${randomToken(12)}`,
         displayName: normalized,
         displayNameKey: normalized.toLocaleLowerCase(),
+        avatarColor: '#f35f4c',
         passwordHash,
         role: 'member'
       };
 
       const { rows } = await client.query(
         `
-          INSERT INTO users (id, display_name, display_name_key, password_hash, role)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO users (id, display_name, display_name_key, avatar_color, password_hash, role)
+          VALUES ($1, $2, $3, $4, $5, $6)
           RETURNING *
         `,
-        [user.id, user.displayName, user.displayNameKey, user.passwordHash, user.role]
+        [user.id, user.displayName, user.displayNameKey, user.avatarColor, user.passwordHash, user.role]
       );
 
       await client.query('UPDATE invites SET used_at = now(), used_by = $1 WHERE id = $2', [
@@ -595,6 +633,20 @@ class PostgresStore {
     return result.rowCount > 0;
   }
 
+  async updateProfile({ userId, avatarColor }) {
+    const normalizedColor = normalizeAvatarColor(avatarColor);
+    const { rows } = await this.pool.query(
+      'UPDATE users SET avatar_color = $1 WHERE id = $2 RETURNING *',
+      [normalizedColor, userId]
+    );
+
+    if (!rows[0]) {
+      throw new Error('User not found.');
+    }
+
+    return toPublicUser(rowToUser(rows[0]));
+  }
+
   async hasActiveRecoveryCodes(userId) {
     const { rows } = await this.pool.query(
       'SELECT COUNT(*)::int AS count FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL',
@@ -705,6 +757,7 @@ class PostgresStore {
     return {
       id: message.id,
       senderId: message.senderId,
+      mode: message.mode || 'private',
       payload: message.deletedAt ? null : message.payload,
       attachmentId: message.deletedAt ? null : message.attachmentId,
       createdAt: message.createdAt,
@@ -715,7 +768,7 @@ class PostgresStore {
     };
   }
 
-  async addMessage({ senderId, payload, attachmentId, expiresAt, deliveredTo = [] }) {
+  async addMessage({ senderId, mode = 'private', payload, attachmentId, expiresAt, deliveredTo = [] }) {
     const deliveredBy = {
       [senderId]: new Date().toISOString()
     };
@@ -726,13 +779,14 @@ class PostgresStore {
 
     const { rows } = await this.pool.query(
       `
-        INSERT INTO messages (id, sender_id, type, payload, attachment_id, expires_at, delivered_by, read_by)
-        VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, '{}'::jsonb)
+        INSERT INTO messages (id, sender_id, mode, type, payload, attachment_id, expires_at, delivered_by, read_by)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, '{}'::jsonb)
         RETURNING *
       `,
       [
         `msg_${randomToken(12)}`,
         senderId,
+        mode === 'private' ? 'private' : 'standard',
         'sealed',
         JSON.stringify(payload),
         attachmentId || null,

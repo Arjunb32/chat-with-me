@@ -169,6 +169,14 @@ function normalizeDisplayName(displayName) {
   return normalized;
 }
 
+function normalizeAvatarColor(avatarColor) {
+  if (typeof avatarColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(avatarColor.trim())) {
+    throw new Error('Avatar color must be a 6-digit hex color.');
+  }
+
+  return avatarColor.trim().toLowerCase();
+}
+
 function validatePassword(password) {
   if (typeof password !== 'string' || password.length < 10 || password.length > 256) {
     throw new Error('Password must be 10 to 256 characters.');
@@ -196,6 +204,7 @@ function toPublicUser(user) {
   return {
     id: user.id,
     displayName: user.displayName,
+    avatarColor: user.avatarColor || '#147c72',
     role: user.role,
     createdAt: user.createdAt
   };
@@ -218,6 +227,7 @@ module.exports = {
   futureDate,
   hashPassword,
   isExpired,
+  normalizeAvatarColor,
   normalizeDisplayName,
   passwordNeedsRehash,
   randomSalt,

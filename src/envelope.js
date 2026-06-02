@@ -45,7 +45,26 @@ function validateMessageInput(input) {
     throw new Error('Invalid message.');
   }
 
-  const payload = validateEncryptionEnvelope(input.payload);
+  const mode = input.mode === 'private' ? 'private' : 'standard';
+  let payload;
+  if (mode === 'private') {
+    payload = validateEncryptionEnvelope(input.payload);
+  } else {
+    if (!input.payload || typeof input.payload !== 'object' || Array.isArray(input.payload)) {
+      throw new Error('Invalid plain payload.');
+    }
+    const kind = input.payload.kind || 'text';
+    if (!['text', 'photo', 'voice'].includes(kind)) {
+      throw new Error('Invalid plain payload.');
+    }
+    payload = {
+      ...input.payload,
+      kind
+    };
+    if (payload.text !== undefined) {
+      payload.text = String(payload.text).slice(0, 4000);
+    }
+  }
   const attachmentId = input.attachmentId || null;
   if (attachmentId !== null && (typeof attachmentId !== 'string' || attachmentId.length > 120)) {
     throw new Error('Attachment is invalid for this message.');
@@ -57,6 +76,7 @@ function validateMessageInput(input) {
   }
 
   return {
+    mode,
     payload,
     attachmentId,
     expiresAt: expiresInMs ? new Date(Date.now() + expiresInMs).toISOString() : null
