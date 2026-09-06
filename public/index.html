@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f35f4c">
     <title>Chat With Me</title>
     <link rel="manifest" href="/manifest.webmanifest?v=20260521-1">
-    <link rel="stylesheet" href="/styles.css?v=20260521-1">
+    <link rel="stylesheet" href="/styles.css?v=20260906-calls">
   </head>
   <body>
     <section id="authView" class="auth-view">
@@ -101,6 +101,8 @@
           <p id="presenceText">Offline</p>
         </div>
         <div class="header-actions">
+          <button id="voiceCallButton" type="button" class="ghost" disabled>Voice call</button>
+          <button id="videoCallButton" type="button" class="ghost" disabled>Video call</button>
           <button id="modeToggle" class="mode-toggle" type="button" aria-label="Switch chat mode" aria-pressed="false">
             <span class="mode-knob" aria-hidden="true"></span>
             <span id="modeLabel">Standard</span>
@@ -157,6 +159,29 @@
         <div id="contactsList" class="contacts-list"></div>
       </div>
     </aside>
+
+    <dialog id="callDialog" class="modal call-modal" aria-labelledby="callTitle" aria-describedby="callStatus">
+      <div class="call-content">
+        <p class="call-eyebrow">CHAT WITH ME</p>
+        <h2 id="callTitle">Call</h2>
+        <p id="callStatus" role="status">Connecting…</p>
+        <p id="callTimer" class="call-timer" aria-label="Call duration"></p>
+        <div id="callVideos" class="call-videos" hidden>
+          <video id="callRemoteVideo" autoplay playsinline muted aria-label="Other person's video"></video>
+          <video id="callLocalVideo" autoplay playsinline muted aria-label="Your camera preview"></video>
+        </div>
+        <audio id="callRemoteAudio" autoplay></audio>
+        <p class="call-hint">Both people need to keep the chat open. Calls are not recorded.</p>
+        <div class="call-actions">
+          <button id="callAcceptButton" type="button">Accept call</button>
+          <button id="callDeclineButton" type="button" class="ghost">Decline</button>
+          <button id="callMuteButton" type="button" class="ghost" aria-pressed="false" hidden>Mute microphone</button>
+          <button id="callCameraButton" type="button" class="ghost" aria-pressed="false" hidden>Turn camera off</button>
+          <button id="callPlayButton" type="button" class="ghost" hidden>Play call audio</button>
+          <button id="callEndButton" type="button" class="call-end" hidden>Hang up</button>
+        </div>
+      </div>
+    </dialog>
 
     <dialog id="inviteDialog" class="modal">
       <form method="dialog">
@@ -226,6 +251,7 @@
     </dialog>
 
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/app.js?v=20260521-1"></script>
+    <script src="/calls.js?v=20260906-calls"></script>
+    <script src="/app.js?v=20260906-calls"></script>
   </body>
 </html>

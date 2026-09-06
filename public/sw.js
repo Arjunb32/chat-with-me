@@ -1,8 +1,9 @@
-const CACHE_NAME = 'chat-with-me-v5';
+const CACHE_NAME = 'chat-with-me-v6-calls';
 const SHELL = [
   '/',
-  '/styles.css?v=20260521-1',
-  '/app.js?v=20260521-1',
+  '/styles.css?v=20260906-calls',
+  '/calls.js?v=20260906-calls',
+  '/app.js?v=20260906-calls',
   '/manifest.webmanifest?v=20260521-1',
   '/icon.svg'
 ];

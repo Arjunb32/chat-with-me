@@ -3,6 +3,7 @@ services:
     name: chat-with-me
     runtime: node
     plan: starter
+    numInstances: 1
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /api/health
@@ -24,6 +25,10 @@ services:
       - key: PUBLIC_ORIGIN
         sync: false
       - key: APP_SETUP_CODE
+        sync: false
+      - key: TURN_KEY_ID
+        sync: false
+      - key: TURN_KEY_API_TOKEN
         sync: false
       - key: MAX_UPLOAD_MB
         value: 12

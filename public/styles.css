@@ -137,6 +137,26 @@ label {
   display: none !important;
 }
 
+dialog.call-modal { width: min(680px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 0; }
+.call-content { display: grid; gap: 16px; padding: 28px; text-align: center; }
+.call-content h2, .call-content p { margin: 0; }
+.call-eyebrow { color: var(--teal); font-size: 0.75rem; font-weight: 800; letter-spacing: 0.15em; }
+.call-hint, #callStatus { color: var(--muted); font-size: 0.9rem; }
+.call-timer { font-variant-numeric: tabular-nums; font-weight: 700; min-height: 1.3em; }
+.call-videos { position: relative; overflow: hidden; border-radius: 12px; background: #11171d; aspect-ratio: 16 / 10; }
+#callRemoteVideo { width: 100%; height: 100%; object-fit: contain; }
+#callLocalVideo { position: absolute; bottom: 12px; right: 12px; width: 26%; max-height: 36%; border-radius: 8px; object-fit: cover; transform: scaleX(-1); background: #26313b; border: 2px solid white; }
+.call-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+.call-actions button { min-height: 46px; }
+button.call-end { background: #bd302a; color: white; }
+button.call-end:hover { background: #9e231e; }
+.call-actions [aria-pressed="true"] { border-color: var(--accent); background: var(--mine); }
+@media (max-width: 480px) {
+  .call-content { padding: 20px 16px; }
+  .call-videos { aspect-ratio: 4 / 5; }
+  .call-actions button { flex: 1 1 40%; }
+}
+
 .auth-view,
 .unlock-view {
   min-height: 100%;

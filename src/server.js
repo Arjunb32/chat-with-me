@@ -9,6 +9,8 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const { Server } = require('socket.io');
+const { createCallController } = require('./calls');
+const { getRtcConfiguration } = require('./rtc-config');
 
 const JsonStore = require('./store');
 const PostgresStore = require('./postgres-store');
@@ -51,6 +53,14 @@ const io = new Server(server, {
 });
 
 const onlineUsers = new Map();
+const calls = createCallController({
+  io, onlineUsers,
+  listUsers: () => store.listPublicUsers(),
+  validateSession: async (socket) => {
+    const session = await store.findSessionByTokenHash(socket.sessionTokenHash);
+    return Boolean(session && session.user.id === socket.user.id);
+  }
+});
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -124,6 +134,10 @@ app.use(
 );
 app.use(compression());
 app.use(cookieParser());
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self)');
+  next();
+});
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -539,6 +553,7 @@ app.post('/api/login', authLimiter, async (req, res, next) => {
 app.post('/api/logout', requireAuth, async (req, res, next) => {
   try {
     await store.deleteSession(sha256(req.cookies[SESSION_COOKIE]));
+    io.in(`session:${req.session.id}`).disconnectSockets(true);
     await audit(req, 'auth.logout', { actorId: req.user.id });
     clearSessionCookie(res);
     res.json({ ok: true });
@@ -552,6 +567,18 @@ app.get('/api/me', requireAuth, async (req, res, next) => {
     res.json(await buildMePayload(req.user));
   } catch (error) {
     next(error);
+  }
+});
+
+const callConfigLimiter = rateLimit({ windowMs: 60000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false });
+app.get('/api/calls/config', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+}, requireAuth, callConfigLimiter, async (req, res) => {
+  try {
+    res.json(await getRtcConfiguration(req.user.id));
+  } catch (error) {
+    sendError(res, 503, /call|relay/i.test(error.message) ? error.message : 'Call relay is temporarily unavailable.');
   }
 });
 
@@ -598,6 +625,7 @@ app.delete('/api/account/sessions/:id', requireAuth, async (req, res, next) => {
     const revokedCurrent = req.params.id === req.session.id;
 
     if (revoked) {
+      io.in(`session:${req.params.id}`).disconnectSockets(true);
       await audit(req, 'session.revoked', {
         actorId: req.user.id,
         metadata: { sessionId: req.params.id, current: revokedCurrent }
@@ -699,6 +727,12 @@ app.get('/api/contacts', requireAuth, async (req, res, next) => {
 
 io.use(async (socket, next) => {
   try {
+    const origin = socket.handshake.headers.origin;
+    const expectedOrigin = process.env.PUBLIC_ORIGIN || `http://${socket.handshake.headers.host}`;
+    const localDevelopmentOrigin = !IS_PRODUCTION && origin === `http://${socket.handshake.headers.host}`;
+    if (origin && origin !== new URL(expectedOrigin).origin && !localDevelopmentOrigin) {
+      return next(new Error('Call and chat connections must come from this website.'));
+    }
     const cookies = cookie.parse(socket.handshake.headers.cookie || '');
     const session = await sessionFromToken(cookies[SESSION_COOKIE]);
     if (!session) {
@@ -706,6 +740,8 @@ io.use(async (socket, next) => {
     }
 
     socket.user = session.user;
+    socket.sessionTokenHash = sha256(cookies[SESSION_COOKIE]);
+    socket.sessionId = session.session.id;
     return next();
   } catch (error) {
     return next(error);
@@ -715,7 +751,22 @@ io.use(async (socket, next) => {
 io.on('connection', async (socket) => {
   const user = socket.user;
   socket.join('private-chat');
+  socket.join(`session:${socket.sessionId}`);
   addOnlineUser(user.id, socket.id);
+  calls.attach(socket);
+  const sessionCheck = setInterval(async () => {
+    try {
+      if (!await store.findSessionByTokenHash(socket.sessionTokenHash)) socket.disconnect(true);
+    } catch {
+      socket.disconnect(true);
+    }
+  }, 15000);
+  sessionCheck.unref();
+  socket.on('disconnect', () => {
+    clearInterval(sessionCheck);
+    removeOnlineUser(user.id, socket.id);
+    emitPresence();
+  });
   emitPresence();
 
   try {
@@ -804,10 +855,6 @@ io.on('connection', async (socket) => {
     });
   });
 
-  socket.on('disconnect', () => {
-    removeOnlineUser(user.id, socket.id);
-    emitPresence();
-  });
 });
 
 app.use(

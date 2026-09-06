@@ -2,6 +2,15 @@
 
 Private two-person chat website with secure login, invite-only signup, browser-side encryption, real-time text messages, encrypted photo upload, and encrypted voice messages.
 
+Voice and video calls are available between the two signed-in people while both have
+the chat open. Use **Voice call** or **Video call** in the header; the recipient can
+accept or decline. Calls include microphone mute, camera on/off for video, and hang-up.
+Calls stop on logout, locking the chat, session revocation, or loss of the chat connection.
+Calls are not recorded and have a one-hour limit; you can start another call afterward.
+
+Live calls use WebRTC transport encryption, independently of the private-message
+encryption phrase. See `DEPLOYMENT.md` for the required production call relay.
+
 ## Run Locally
 
 ```powershell
@@ -11,7 +20,9 @@ npm run dev
 
 Open `http://localhost:5177`.
 
-The real local `.env` is already present and includes `APP_SETUP_CODE`. If the first account has not been created yet, enter that setup code on the first-account screen.
+Copy `.env.example` to a private `.env` and choose a strong `APP_SETUP_CODE`.
+The real `.env` is deliberately excluded from Git. If the first account has not
+been created yet, enter your setup code on the first-account screen.
 
 ## First Setup
 
