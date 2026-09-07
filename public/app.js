@@ -21,6 +21,7 @@
     decryptedMessages: new Map(),
     attachmentCache: new Map(),
     recording: null,
+    recordingPending: null,
     recordingTimer: null,
     preview: null,
     pendingUploads: new Map(),
@@ -92,7 +93,20 @@
     contactsList: document.querySelector('#contactsList')
   };
 
+  const calling = window.ChatCalls.create({
+    api,
+    getPeer: () => {
+      const peer = state.people.find((person) => person.id === state.activeContactId) ||
+        state.people.find((person) => person.id !== state.me?.id);
+      return peer ? { ...peer, online: state.onlineUserIds.includes(peer.id) } : null;
+    },
+    canCall: () => Boolean(state.me && !els.chatView.hidden && (!isPrivateMode() || state.cryptoRootKey)),
+    isRecording: () => Boolean(state.recording || state.recordingPending),
+    notice: setUploadLine
+  });
+
   function setView(viewName) {
+    if (viewName !== 'chat') calling.stop();
     els.authView.hidden = viewName !== 'auth';
     els.unlockView.hidden = viewName !== 'unlock';
     els.chatView.hidden = viewName !== 'chat';
@@ -135,7 +149,7 @@
     updateModeUi();
     if (options.enter !== false && state.me) {
       if (isPrivateMode() && !state.cryptoRootKey) {
-        setView('unlock');
+        lockChat();
       } else {
         enterChat().catch((error) => setUploadLine(error.message));
       }
@@ -413,6 +427,8 @@
   }
 
   async function logout() {
+    calling.stop();
+    cancelVoiceCapture();
     try {
       await api('/api/logout', { method: 'POST' });
     } catch {
@@ -425,6 +441,8 @@
   }
 
   function clearLocalSession() {
+    calling.bindSocket(null);
+    cancelVoiceCapture();
     if (state.socket) {
       state.socket.disconnect();
     }
@@ -450,6 +468,8 @@
   }
 
   function lockChat() {
+    calling.bindSocket(null);
+    cancelVoiceCapture();
     if (state.socket) {
       state.socket.disconnect();
       state.socket = null;
@@ -492,6 +512,7 @@
   }
 
   function connectSocket() {
+    calling.bindSocket(null);
     if (state.socket) {
       state.socket.disconnect();
     }
@@ -499,6 +520,7 @@
     state.socket = io({
       transports: ['websocket', 'polling']
     });
+    calling.bindSocket(state.socket);
 
     state.socket.on('connect', () => {
       renderPresence();
@@ -559,6 +581,7 @@
   }
 
   function renderPresence() {
+    calling.refresh();
     const peer = state.activeContactId
       ? state.people.find((person) => person.id === state.activeContactId) || state.contacts.find((person) => person.id === state.activeContactId)
       : state.people.find((person) => person.id !== state.me.id);
@@ -1144,11 +1167,28 @@
   }
 
   async function startRecording() {
+    if (calling.isActive()) throw new Error('Finish your call before recording a voice message.');
+    if (state.recording || state.recordingPending) return;
     if (!navigator.mediaDevices || !window.MediaRecorder) {
       throw new Error('Voice recording is not supported in this browser.');
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const pending = {};
+    state.recordingPending = pending;
+    calling.refresh();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      if (state.recordingPending === pending) state.recordingPending = null;
+      calling.refresh();
+      throw error;
+    }
+    if (state.recordingPending !== pending) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    state.recordingPending = null;
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
       : MediaRecorder.isTypeSupported('audio/webm')
@@ -1175,8 +1215,9 @@
       els.recordButton.classList.remove('recording');
       els.recordButton.querySelector('span').textContent = 'Voice';
       stream.getTracks().forEach((track) => track.stop());
+      calling.refresh();
 
-      if (!recording.chunks.length) return;
+      if (recording.cancelled || !recording.chunks.length) return;
 
       try {
         const durationMs = Date.now() - recording.startedAt;
@@ -1192,11 +1233,23 @@
     });
 
     state.recording = recording;
+    calling.refresh();
     recorder.start();
     startRecordingVisualizer(recording);
     els.recordButton.classList.add('recording');
     els.recordButton.querySelector('span').textContent = 'Stop';
   }
+
+  function cancelVoiceCapture() {
+    state.recordingPending = null;
+    if (state.recording) {
+      state.recording.cancelled = true;
+      state.recording.stream.getTracks().forEach((track) => track.stop());
+      stopRecording();
+    }
+  }
+
+  window.addEventListener('pagehide', cancelVoiceCapture);
 
   function showVoicePreview(blob, meta) {
     const url = URL.createObjectURL(blob);
