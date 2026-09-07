@@ -1,12 +1,16 @@
 # Items Kept For Your Approval Or Assistance
 
-These are no longer code blockers. The app now has production-ready paths for them, but these items still need your actual accounts, credentials, or purchases before internet launch.
+The user requires a zero-cost deployment. Do not create paid services, add payment
+details, or treat a billable free allowance as a spending cap. These items still
+need actual free accounts and configuration before the app is fully usable online.
 
 - Connect the existing `chatwithme.space` domain to the chosen app host.
-- Create a Render account/project, or give VPS access for the Docker + Caddy path.
-- Create a private Cloudflare R2 bucket or S3-compatible bucket.
+- Finish the Render Free web service (account access is available).
+- Sign in to Supabase and create a Free database plus private Storage bucket;
+  disable its Data API because the app handles authentication itself.
 - Add real production values for `PUBLIC_ORIGIN`, `APP_SETUP_CODE`, `DATABASE_URL`, and `S3_*`.
-- Configure a TURN relay using `TURN_KEY_ID` + `TURN_KEY_API_TOKEN`, or `TURN_URLS` + `TURN_SHARED_SECRET`.
+- Configure a verified free TURN relay with no automatic charges; keep provider
+  credentials only in the server environment.
 - Verify voice and video calls across separate networks before the scheduled release.
 - Choose backup schedule: daily is recommended for this private app.
 - Add a production backup destination with `BACKUP_S3_BUCKET`.

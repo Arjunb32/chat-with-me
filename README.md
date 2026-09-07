@@ -42,8 +42,13 @@ Production support now includes:
 
 - PostgreSQL with `STORE_DRIVER=postgres`.
 - S3-compatible encrypted media storage with `MEDIA_DRIVER=s3`.
-- Render Blueprint deployment through `render.yaml`.
+- Free Render web hosting through `render.yaml`, with an external Supabase Free
+  database and private file storage. The Blueprint creates no paid database.
 - Docker + Caddy HTTPS deployment through `deploy/docker-compose.production.yml`.
 - Encrypted backups with `npm run backup`.
 - JSON-to-PostgreSQL migration with `npm run migrate:postgres`.
 - Local-media-to-S3 migration with `npm run migrate:media`.
+
+The free deployment is for personal use within provider quotas. Render sleeps
+after 15 minutes idle and can take about a minute to wake; Supabase can pause
+after a week of inactivity. Follow the free setup and quota notes in `DEPLOYMENT.md`.

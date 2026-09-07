@@ -40,3 +40,47 @@ test('failed or unusable relay responses fail closed', async () => {
   await assert.rejects(getRtcConfiguration('alice', env, async () => ({ ok: false })), /unavailable/);
   await assert.rejects(getRtcConfiguration('alice', env, async () => ({ ok: true, json: async () => ({ iceServers: [] }) })), /no usable/);
 });
+
+test('Metered credentials are fetched server-side without exposing its master API key', async () => {
+  const env = { NODE_ENV: 'production', METERED_TURN_APP_NAME: 'chat-with-me', METERED_TURN_API_KEY: 'test-only/key?&', RTC_RELAY_ONLY: 'true' };
+  const config = await getRtcConfiguration('alice', env, async (url, options) => {
+    const endpoint = new URL(url);
+    assert.equal(endpoint.origin, 'https://chat-with-me.metered.live');
+    assert.equal(endpoint.pathname, '/api/v1/turn/credentials');
+    assert.equal(endpoint.searchParams.get('apiKey'), env.METERED_TURN_API_KEY);
+    assert.equal(options.redirect, 'error');
+    assert.ok(options.signal instanceof AbortSignal);
+    return { ok: true, json: async () => [null, { urls: 'stun:relay.test:80' }, { urls: ['turns:relay.test:443?transport=tcp', 'https://bad.test', 'turn:relay.test:53'], username: 'call-user', credential: 'call-password', apiKey: env.METERED_TURN_API_KEY }] };
+  });
+  assert.equal(config.hasRelay, true);
+  assert.equal(config.iceTransportPolicy, 'relay');
+  assert.deepEqual(config.iceServers[1], { urls: ['turns:relay.test:443?transport=tcp'], username: 'call-user', credential: 'call-password' });
+  assert.equal(JSON.stringify(config).includes(env.METERED_TURN_API_KEY), false);
+});
+
+test('Metered app names cannot redirect requests or send keys to another host', async () => {
+  for (const appName of ['evil.test/path', 'user@evil.test', '-bad', 'bad-', 'a'.repeat(64), '']) {
+    await assert.rejects(getRtcConfiguration('alice', { NODE_ENV: 'production', METERED_TURN_APP_NAME: appName, METERED_TURN_API_KEY: 'secret' }, () => assert.fail('must not send request')), /finish configuring/);
+  }
+  await assert.rejects(getRtcConfiguration('alice', { METERED_TURN_APP_NAME: 'valid-name' }), /finish configuring/);
+});
+
+test('Metered transport errors cannot expose the key-bearing provider URL', async () => {
+  const env = { NODE_ENV: 'production', METERED_TURN_APP_NAME: 'test-app', METERED_TURN_API_KEY: 'private-master-key' };
+  await assert.rejects(getRtcConfiguration('alice', env, async (url) => { throw new Error(`Failed: ${url}`); }), (error) => {
+    assert.match(error.message, /unavailable/);
+    assert.equal(error.message.includes(env.METERED_TURN_API_KEY), false);
+    return true;
+  });
+  await assert.rejects(getRtcConfiguration('alice', env, async () => ({ ok: false })), /free allowance/);
+});
+
+test('Metered malformed and STUN-only responses fail closed in production', async () => {
+  const env = { NODE_ENV: 'production', METERED_TURN_APP_NAME: 'test-app', METERED_TURN_API_KEY: 'key' };
+  for (const payload of [null, {}, 'invalid']) {
+    await assert.rejects(getRtcConfiguration('alice', env, async () => ({ ok: true, json: async () => payload })), /invalid configuration/);
+  }
+  for (const payload of [[], [null], [{ urls: 'stun:relay.test:80' }], [{ urls: 'turn:relay.test:80' }]]) {
+    await assert.rejects(getRtcConfiguration('alice', env, async () => ({ ok: true, json: async () => payload })), /no usable relay/);
+  }
+});

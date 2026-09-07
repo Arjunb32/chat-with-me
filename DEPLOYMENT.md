@@ -1,5 +1,51 @@
 # Production Deployment
 
+## Free personal deployment
+
+The default `render.yaml` uses **Render Free** and creates no Render database or
+paid service. Keep Render on its free workspace and do not add a payment method:
+without one, exceeding the included bandwidth suspends free services rather than
+charging for more. Do not upgrade or enable paid extras.
+
+Use **Supabase Free** for PostgreSQL and encrypted files:
+
+1. Create a Free project near the Render service (Singapore). Disable the
+   **Data API** before the app starts: this app uses its own authentication and
+   creates SQL tables without Supabase row-level security policies. Keep Data API
+   disabled so those tables cannot be accessed through an anonymous REST API.
+2. Use the project's **session pooler** PostgreSQL connection on port 5432 for
+   `DATABASE_URL`. It supports IPv4 hosts. Set `PGSSLMODE=require` and retain TLS
+   verification. Do not use the transaction pooler when a session connection is
+   available. Copy the real connection details from the project dashboard.
+3. Create a **private** Storage bucket. Generate server-side S3 access credentials
+   and set `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, and
+   `S3_SECRET_ACCESS_KEY` in Render. Use the endpoint and region from Supabase's
+   S3 settings, `S3_FORCE_PATH_STYLE=true`, and `S3_PREFIX=attachments`. Leave
+   `S3_SERVER_SIDE_ENCRYPTION` unset. Never put credentials in browser code or Git.
+4. Configure the free calling relay described below. Verify the actual account
+   offers the free allowance and does not require payment or automatic overages
+   before activation. A metered free allowance alone is not a zero-cost guarantee.
+5. Set `PUBLIC_ORIGIN=https://chatwithme.space`, a long random `APP_SETUP_CODE`,
+   and a private `BACKUP_PASSPHRASE`. Finish authenticated messaging, uploads, and
+   forced-relay call checks before describing the app as fully working.
+6. Connect the existing domain using Render's custom-domain instructions and
+   the existing DNS provider. Render Free supports custom domains and HTTPS.
+
+Free-tier limits are real: Render sleeps after 15 minutes idle and can take about
+a minute to wake. Its local filesystem is temporary, so do not use local JSON or
+local uploads for a deployed account. Supabase Free includes 500 MB of database
+storage, 1 GB of files, and 5 GB of origin egress; it may pause after a week of
+inactivity and restrict usage beyond its allowance. Save encrypted backups outside
+the database. Render's own free database expires after 30 days, so it is not used.
+Calls can stop if a free host restarts, and free tiers provide no uptime guarantee.
+
+Current provider references: [Render Free](https://render.com/docs/free),
+[Supabase pricing](https://supabase.com/pricing),
+[Supabase database connections](https://supabase.com/docs/guides/database/connecting-to-postgres),
+[Supabase S3](https://supabase.com/docs/guides/storage/s3/authentication).
+
+## Other hosting options
+
 Recommended hosted stack:
 
 - Domain/DNS: Cloudflare DNS.
@@ -13,7 +59,9 @@ Before deployment, run `npm run check` and `npm test`. The app requires Node `>=
 ## Render + PostgreSQL + R2
 
 1. Push this project to a private GitHub repository.
-2. In Render, create a Blueprint from `render.yaml`.
+2. In Render, create a web service and configure an external PostgreSQL database.
+   The default `render.yaml` now creates only a Free web service; paid hosting and
+   a paid database must be selected separately and require a budget.
 3. Create a private Cloudflare R2 bucket.
 4. Create R2 S3 API credentials with access only to that bucket.
 5. Set these Render environment variables:
@@ -100,9 +148,20 @@ across different networks.
 
 Choose one relay configuration in the hosting service's environment settings:
 
+- Metered OpenRelay: set `METERED_TURN_APP_NAME` (only the app name, not a URL)
+  and `METERED_TURN_API_KEY`. The authenticated backend fetches the provider's
+  ICE-server array; the master API key stays server-side. Credentials use the
+  provider's expiry rules; this integration does not create its own two-hour
+  Metered credentials. The [OpenRelay page](https://www.metered.ca/tools/openrelay/)
+  advertises 20 GB/month free, while the separate premium TURN offer has different
+  terms. Verify the actual account's free entitlement, zero balance, no card, and
+  no automatic recharge before activation. If it requires payment, stop and choose
+  another free relay. Exhausted/unavailable relay service reports an error instead
+  of pretending a STUN-only call is reliable. The default Blueprint has these fields.
 - Cloudflare Realtime TURN: set `TURN_KEY_ID` and `TURN_KEY_API_TOKEN`. The backend
   exchanges these for two-hour temporary browser credentials. The API token is never
-  sent to the browser. The Render Blueprint includes these two secret fields.
+  sent to the browser. This provider bills beyond its free allowance, so do not
+  enable it for a strict zero-cost deployment without a confirmed hard usage cap.
 - coturn: set `TURN_URLS` (comma-separated TURN/TURNS URLs) and `TURN_SHARED_SECRET`
   matching your relay's `use-auth-secret` configuration. The backend signs temporary
   credentials. If using this option, replace the two Cloudflare TURN fields in the

@@ -2,7 +2,10 @@ services:
   - type: web
     name: chat-with-me
     runtime: node
-    plan: starter
+    # Keep this free. Use an external free database; Render's free DB expires.
+    plan: free
+    region: singapore
+    autoDeployTrigger: "off"
     numInstances: 1
     buildCommand: npm ci
     startCommand: npm start
@@ -10,6 +13,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: 24.19.0
       - key: STORE_DRIVER
         value: postgres
       - key: MEDIA_DRIVER
@@ -17,19 +22,19 @@ services:
       - key: PORT
         value: 10000
       - key: DATABASE_URL
-        fromDatabase:
-          name: chat-with-me-db
-          property: connectionString
+        sync: false
       - key: PGSSLMODE
         value: require
       - key: PUBLIC_ORIGIN
         sync: false
       - key: APP_SETUP_CODE
         sync: false
-      - key: TURN_KEY_ID
+      - key: METERED_TURN_APP_NAME
         sync: false
-      - key: TURN_KEY_API_TOKEN
+      - key: METERED_TURN_API_KEY
         sync: false
+      - key: RTC_RELAY_ONLY
+        value: "true"
       - key: MAX_UPLOAD_MB
         value: 12
       - key: S3_BUCKET
@@ -37,7 +42,9 @@ services:
       - key: S3_ENDPOINT
         sync: false
       - key: S3_REGION
-        value: auto
+        sync: false
+      - key: S3_FORCE_PATH_STYLE
+        value: "true"
       - key: S3_ACCESS_KEY_ID
         sync: false
       - key: S3_SECRET_ACCESS_KEY
@@ -46,9 +53,3 @@ services:
         value: attachments
       - key: BACKUP_PASSPHRASE
         sync: false
-
-databases:
-  - name: chat-with-me-db
-    plan: basic-256mb
-    databaseName: chatwithme
-    user: chatwithme
